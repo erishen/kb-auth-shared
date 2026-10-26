@@ -11,21 +11,16 @@
 
 接入方（薄 shim 只做 `import` + `configure()` 注入资源表 + re-export，调用点 0 改动）：
 
-| 项目 | shim 位置 | 状态 |
-|---|---|---|
-| `admin`（kb-auth 集中服务） | 直接 `import "../shared/*.lume"` | ✅ 用共享引擎跑跨项目 `/api/authorize` |
-| `math` | `math/lib/{access,admin,json}.lume` | ✅ 已改 shim（未提交） |
-| `chinese` | `chinese/lib/{access,admin,json}.lume` | ✅ 已改 shim（未跟踪） |
-| `history` | `history/lib/access.lume`（只 access，无 admin shim：审计直接 re-export 引擎） | ✅ 已建 shim（10-24，未提交） |
-| `medical-stats` | 无 `lib/access.lume` | ❌ 还没接，要从建 shim 开始 |
+- 参考消费方是 **kb-auth** 服务本身（直接 `import "../shared/*.lume"`），跑跨项目 `/api/authorize`。
+- 多个兄弟 **内容站点** 以同样方式接入：各自提供一个薄 shim，import 引擎并通过 `configure()` 注入本站资源表。
 
 > 接入集中鉴权（挂 `kb-auth-shared` 卷、迁移哈希、让位分支）的操作步骤与进度，
 > 见 **kb-auth 仓库**（`../kb-auth/blob/main/ONBOARDING.md`）。本文件只讲**模型与契约**。
 
 ## 两层模型：中央管身份，学段授权留本地
 
-起因是硬约束：各项目学段词表互斥——math 是 `primary-math/middle-school/college-entrance/university`，
-chinese 是 `primary/junior/senior/univ`。**一份中央 `accounts.json` 不可能同时当
+起因是硬约束：各站点学段词表互斥——一个站可能是 `vocab-A-1/vocab-A-2/...`，另一个站是
+`vocab-B-1/vocab-B-2/...`。**一份中央 `accounts.json` 不可能同时当
 两个项目的学段权威**，所以按"哪一层与项目无关"来切：
 
 | 属性 | 权威 | 为什么 |
@@ -133,9 +128,9 @@ ABAC 时，得先把 `state/` 补进各自 `.gitignore`，否则审计日志（�
 | `corrupt` | `AUTHORITIES_DIR=fixtures/corrupt-central`（故意截断的 JSON） | 11 | 表读不到必须 DENY（不是放行）、认证关闭仍放行、`accounts_list(null)` 不崩 |
 | `grants` | `STATE_DIR=/tmp` 副本 + `AUTHORITIES_DIR=fixtures/central` | 31 | 本地学段授权写口：带 `role`/`password` 直接 400、中央无此身份 404、**`stages=[]` 必须显式 `confirm_all`**（否则「清空授权」＝静默放开全库）、revoke 是删条目而不是写空数组、绝不生成 htpasswd/map、种子里的 `comment` 顶层字段不被抹掉 |
 
-夹具用**两套不同词表**是刻意的：`central/` 里 `alice` 的 stages 是 math 词表
-`primary-math`，`local-grant-chinese/` 里是 `junior`，于是「生效的到底是哪份」有唯一
-答案（`junior` PERMIT、`primary-math` DENY）。JSON 不能写 `//` 注释，说明一律放
+夹具用**两套不同词表**是刻意的：中央夹具里 `alice` 的 stages 用词汇表 A，本地授权夹具
+用词汇表 B，于是「生效的到底是哪份」有唯一答案（B PERMIT、A DENY）。JSON 不能写 `//`
+注释，说明一律放
 `"comment"` 字段——写成注释会被 `safe_json` 判成损坏。
 
 ```sh
@@ -147,12 +142,12 @@ make -C work/knowledge/shared test-central   # 只跑一套
 
 ```sh
 make -C work/knowledge/shared check            # 本仓 85 条
-make -C work/knowledge/math   access-test      # 既有 20 条：真实 shim 的回归
 make -C work/knowledge/admin  check            # 下游消费者 + server.lume type-check
+# 再加各消费站点自己的 access-test（真实 shim 回归）
 ```
 
-`math/tools/test-access.lume` 走的是 `lib/access.lume → shared/abac.lume` 的真实
-import 链，是「没破坏未接入项目行为」的主要证据。⚠️ 它会往 `math/state/abac-audit.jsonl`
+某消费站点的 `tools/test-access.lume` 走的是 `lib/access.lume → shared/abac.lume` 的真实
+import 链，是「没破坏未接入项目行为」的主要证据。⚠️ 它会往该站点的 `state/abac-audit.jsonl`
 追加 DENY 留痕（该目录被 gitignore，无版本面影响）；手工跑想避开就
 `STATE_DIR=/tmp/xxx ../../lume/lume/bin/lume tools/test-access.lume`。
 
@@ -181,4 +176,4 @@ CI 工作流在 `.github/workflows/check.yml`，依赖 `erishen/lume`（public�
 ## 相关
 
 - 集中鉴权接入步骤 / 进度 / 代码-vs-线上对照：见 **kb-auth 仓库**（`../kb-auth`）
-- 各站点自己的引擎与数据：`../{math,history,chinese,medical-stats}/README.md`
+- 各消费站点自己的引擎与数据：见对应站点仓库

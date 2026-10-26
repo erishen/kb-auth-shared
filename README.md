@@ -12,13 +12,8 @@ change here affects three projects at once (read "what to run before changing th
 
 Consumers (the thin shim only does `import` + `configure()` to inject the resource table + re-export, zero call-site changes):
 
-| Project | Shim location | Status |
-|---|---|---|
-| `admin` (kb-auth central service) | directly `import "../shared/*.lume"` | ✅ runs cross-project `/api/authorize` with the shared engine |
-| `math` | `math/lib/{access,admin,json}.lume` | ✅ shim updated (not committed) |
-| `chinese` | `chinese/lib/{access,admin,json}.lume` | ✅ shim updated (untracked) |
-| `history` | `history/lib/access.lume` (access only, no admin shim: audit re-exports the engine) | ✅ shim created (10-24, not committed) |
-| `medical-stats` | no `lib/access.lume` | ❌ not yet wired; start from building the shim |
+- The reference consumer is the **kb-auth** service itself (direct `import "../shared/*.lume"`), which runs the cross-project `/api/authorize`.
+- Several sibling **content sites** consume the engine the same way, each providing a thin per-site shim that imports the engine and injects its own resource table via `configure()`.
 
 > For the steps and progress of onboarding centralized auth (mounting the `kb-auth-shared`
 > volume, migrating hashes, yielding branches), see the **kb-auth repo**
@@ -26,10 +21,10 @@ Consumers (the thin shim only does `import` + `configure()` to inject the resour
 
 ## Two-layer model: identity is central, stage grants stay local
 
-The hard constraint: each project's stage vocabulary is mutually exclusive — math uses
-`primary-math/middle-school/college-entrance/university`, while chinese uses
-`primary/junior/senior/univ`. **One central `accounts.json` cannot be the stage authority
-for two projects at once**, so we split by "which layer is project-independent":
+The hard constraint: each site's stage vocabulary is mutually exclusive — one site may use
+`vocab-A-1/vocab-A-2/...` while another uses `vocab-B-1/vocab-B-2/...`. **One central
+`accounts.json` cannot be the stage authority for two projects at once**, so we split by
+"which layer is project-independent":
 
 | Attribute | Authority | Why |
 |---|---|---|
@@ -149,9 +144,9 @@ The engine's layering is decided by load-time env and **one script can't switch 
 | `corrupt` | `AUTHORITIES_DIR=fixtures/corrupt-central` (intentionally truncated JSON) | 11 | Unreadable table must DENY (not permit), auth-off still permits, `accounts_list(null)` doesn't crash |
 | `grants` | `STATE_DIR=/tmp` copy + `AUTHORITIES_DIR=fixtures/central` | 31 | Local stage-grant write endpoint: `role`/`password` → 400, central-unknown identity → 404, **`stages=[]` requires explicit `confirm_all`** (otherwise "clear grants" = silently opening the whole library), revoke deletes the entry rather than writing empty, never generates htpasswd/map, top-level `comment` field in seeds is preserved |
 
-The fixtures deliberately use **two different vocabularies**: `central/` has `alice` with the
-math vocabulary `primary-math`, while `local-grant-chinese/` uses `junior`, so "which one
-actually applies" has a single answer (`junior` PERMIT, `primary-math` DENY). JSON can't have
+The fixtures deliberately use **two different vocabularies**: the central fixture assigns
+`alice` a stage from vocabulary A, while the local-grant fixture uses vocabulary B, so "which
+one actually applies" has a single answer (B PERMIT, A DENY). JSON can't have
 `//` comments, so explanations go in the `"comment"` field — writing them as comments would
 make `safe_json` flag the file as corrupt.
 
@@ -164,14 +159,14 @@ make -C work/knowledge/shared test-central   # only one environment
 
 ```sh
 make -C work/knowledge/shared check            # 85 assertions in this repo
-make -C work/knowledge/math   access-test      # existing 20: regression for the real shim
 make -C work/knowledge/admin  check            # downstream consumer + server.lume type-check
+# plus each consumer site's own access-test (real shim regression)
 ```
 
-`math/tools/test-access.lume` exercises the real import chain
+A consumer site's `tools/test-access.lume` exercises the real import chain
 `lib/access.lume → shared/abac.lume`, and is the main evidence that "unonboarded project
-behavior isn't broken". ⚠️ It appends DENY traces to `math/state/abac-audit.jsonl` (that dir
-is gitignored, no version impact); to avoid it manually, run
+behavior isn't broken". ⚠️ It appends DENY traces to that site's `state/abac-audit.jsonl`
+(that dir is gitignored, no version impact); to avoid it manually, run
 `STATE_DIR=/tmp/xxx ../../lume/lume/bin/lume tools/test-access.lume`.
 
 CI runs exactly the two commands above (entrypoint is excluded — it needs docker, separate
@@ -204,4 +199,4 @@ so you must pass `LUME_DIR=$GITHUB_WORKSPACE/_deps/lume` explicitly
 ## Related
 
 - Centralized-auth onboarding steps / progress / code-vs-prod mapping: **kb-auth repo** (`../kb-auth`)
-- Each site's own engine and data: `../{math,history,chinese,medical-stats}/README.md`
+- Each consumer site's own engine and data: see that site's repository
