@@ -6,7 +6,7 @@
 #   json.lume    安全 JSON 解析
 # 引擎本身不是服务，所以没有 dev/run；只有测试与语法检查。
 #
-# 依赖：../../lume/lume/bin/lume（未构建：cd ../../lume/lume && make）
+# 依赖：lume 工具链（bin/lume）—— 见下方 LUME_DIR 解析逻辑（默认相对路径；不存在时回退 PATH 上的 lume）
 #
 # 常用：
 #   make test        跑引擎单测（local / central / corrupt / grants 四遍）
@@ -18,8 +18,14 @@
 # ——拿夹具当草稿纸的话，这一遍会把夹具改掉，后面 local/central 两遍就失真了。
 # 详见 tools/test-abac.lume 头注释。
 
+# lume 工具链位置：默认相对路径 ../../lume/lume，不存在时回退到 PATH 上的 lume；
+# 也可用 LUME_DIR=/abs/path 覆盖（make 不读 .env，请用环境变量或命令行）。
 LUME_DIR ?= ../../lume/lume
-LUME     := $(LUME_DIR)/bin/lume
+ifeq ($(wildcard $(LUME_DIR)/bin/lume),)
+  LUME     := $(if $(shell command -v lume 2>/dev/null),lume,$(LUME_DIR)/bin/lume)
+else
+  LUME     := $(LUME_DIR)/bin/lume
+endif
 
 # 审计写到临时目录，不污染 fixtures（引擎里的 ABAC_AUDIT_PATH 就是为此存在）。
 AUDIT := /tmp/kb-shared-abac-audit.jsonl
