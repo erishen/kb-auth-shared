@@ -1,4 +1,4 @@
-// shared —— 通用 JSON 安全解析层（供 work/knowledge/* 的 ABAC/管理面复用）
+// shared —— 通用 JSON 安全解析层（供各消费方 ABAC/管理面复用）
 //
 // lume 语义要点（v0.4.0+）：
 // - json() 解析失败会置起 sticky VM error，handler 最终会 500——必须用

@@ -1,6 +1,6 @@
 # knowledge/shared —— 复用的 ABAC / 管理端引擎（lume 源码，无独立进程）
 #
-# 这里放的是被 work/knowledge/* 各项目 import 的同一份实现：
+# 这里放的是被各消费方项目 import 的同一份实现：
 #   abac.lume    决策引擎（中央身份 + 本地授权两层读路径、deny-by-default、审计）
 #   admin.lume   账号 CRUD / 哈希热重载（中央模式下写保护）
 #   json.lume    安全 JSON 解析

@@ -1,6 +1,6 @@
 // shared/admin.lume —— 通用管理端（账号 CRUD + 密码哈希热重载 + 审计）
 //
-// 供 work/knowledge/* 各 lume 项目复用。存储分两层（数据源可写分离）：
+// 供各消费方 lume 项目复用。存储分两层（数据源可写分离）：
 //   data/accounts.json      镜像种子（只读，初始账号属性）
 //   STATE_DIR/accounts.json 运行时账号权威（管理端可写；首次自动从种子拷贝）
 //   STATE_DIR/htpasswd.map.json 账号→SHA-512 哈希（JSON map，entrypoint 启动时

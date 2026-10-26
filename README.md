@@ -1,7 +1,7 @@
 # shared — the reusable ABAC engine for the knowledge product family
 
 A set of three `.lume` source files with **no process, no image, and no dependencies**.
-They are `import`ed at runtime by the projects under `work/knowledge/` — so a single
+They are `import`ed at runtime by downstream projects — so a single
 change here affects three projects at once (read "what to run before changing this" first).
 
 | File | Responsibility |
@@ -123,9 +123,9 @@ different in-container layouts:
 
 | Importer | In-container location | Resolves to | How `shared/` enters the container |
 |---|---|---|---|
-| `math` | `/app/lib` → `../../shared` | `/shared` | compose bind-mounts `../shared:/shared:ro` (engine changes take effect instantly, no image rebuild) |
-| `chinese` | `/app/chinese/lib` → `../../shared` | `/app/shared` | `COPY knowledge/shared/ /app/shared/` (engine changes require image rebuild) |
-| `admin` | `/app/admin` → `../shared` | `/app/shared` | `COPY shared/ /app/shared/` (build context = `work/knowledge/`) |
+| `content-site-A` | `/app/lib` → `../../shared` | `/shared` | bind-mount `../shared:/shared:ro` (engine changes take effect instantly, no image rebuild) |
+| `content-site-B` | `/app/<site>/lib` → `../../shared` | `/app/shared` | `COPY shared/ /app/shared/` (engine changes require image rebuild) |
+| `admin` | `/app/admin` → `../shared` | `/app/shared` | `COPY shared/ /app/shared/` (build context = repo root) |
 
 The two delivery methods existing side-by-side is itself a pending consolidation item;
 `.dockerignore` already excludes `shared/tools/` from the image, so fixtures never end up in
@@ -151,15 +151,15 @@ one actually applies" has a single answer (B PERMIT, A DENY). JSON can't have
 make `safe_json` flag the file as corrupt.
 
 ```sh
-make -C work/knowledge/shared check          # 85 assertions, four environments
-make -C work/knowledge/shared test-central   # only one environment
+make check          # 85 assertions, four environments
+make test-central   # only one environment
 ```
 
 ## What to run before changing this
 
 ```sh
-make -C work/knowledge/shared check            # 85 assertions in this repo
-make -C work/knowledge/admin  check            # downstream consumer + server.lume type-check
+make check            # 85 assertions in this repo
+make -C ../kb-auth check   # downstream consumer + server.lume type-check (在 kb-auth 仓库运行)
 # plus each consumer site's own access-test (real shim regression)
 ```
 

@@ -1,6 +1,6 @@
 // shared/abac.lume —— 通用 ABAC（Attribute-Based Access Control）决策引擎
 //
-// 供 work/knowledge/* 各 lume 项目复用的账号与权限层核心（与
+// 供各消费方 lume 项目复用的账号与权限层核心（与
 // spring-abac / lume examples/abac 同构）。各项目的 lib/access.lume 退化为一层
 // 薄 shim：`import <shared>/abac.lume` + `abac.configure({resources, stageResource})`
 // 注入项目特有的资源表与学段资源名，再 re-export 引擎导出，调用点 0 改动。
@@ -20,7 +20,7 @@
 //
 // ============ 路径约定（v2：中央身份 + 本地授权） ============
 //
-// 各知识库项目的学段词表互不相同（math=primary-math/…，chinese=primary/junior/
+// 各消费方的学段词表互不相同（例如词汇表 A=primary-math/…，词汇表 B=primary/junior/
 // senior/univ），单一 accounts.json 无法同时驱动多个项目，故把「身份」与「授权」
 // 拆成两层，仍由本项目进程本地跑 decide()（零网络）：
 //

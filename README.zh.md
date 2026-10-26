@@ -1,6 +1,6 @@
 # shared —— knowledge 产品族的复用 ABAC 引擎
 
-三份 `.lume` 源码，没有进程、没有镜像、没有依赖：被 `work/knowledge/` 下各项目
+三份 `.lume` 源码，没有进程、没有镜像、没有依赖：被各消费方项目
 **在运行时 import**，改一次三个项目同时受影响（改前必读「改这里必须跑什么」）。
 
 | 文件 | 职责 |
@@ -109,9 +109,9 @@ ABAC 时，得先把 `state/` 补进各自 `.gitignore`，否则审计日志（�
 
 | 引用方 | 容器内位置 | 解析结果 | `shared/` 怎么进容器 |
 |---|---|---|---|
-| `math` | `/app/lib` → `../../shared` | `/shared` | compose 宿主绑定 `../shared:/shared:ro`（改引擎即时生效，不落镜像） |
-| `chinese` | `/app/chinese/lib` → `../../shared` | `/app/shared` | `COPY knowledge/shared/ /app/shared/`（改引擎要重建镜像） |
-| `admin` | `/app/admin` → `../shared` | `/app/shared` | `COPY shared/ /app/shared/`（build context = `work/knowledge/`） |
+| `content-site-A` | `/app/lib` → `../../shared` | `/shared` | 宿主绑定 `../shared:/shared:ro`（改引擎即时生效，不落镜像） |
+| `content-site-B` | `/app/<site>/lib` → `../../shared` | `/app/shared` | `COPY shared/ /app/shared/`（改引擎要重建镜像） |
+| `admin` | `/app/admin` → `../shared` | `/app/shared` | `COPY shared/ /app/shared/`（build context = 仓库根） |
 
 两种交付方式并本身就是待收口项；`.dockerignore` 已把
 `shared/tools/` 排除在镜像外，夹具不会被打进运行镜像。
@@ -134,15 +134,15 @@ ABAC 时，得先把 `state/` 补进各自 `.gitignore`，否则审计日志（�
 `"comment"` 字段——写成注释会被 `safe_json` 判成损坏。
 
 ```sh
-make -C work/knowledge/shared check          # 85 条，四套环境
-make -C work/knowledge/shared test-central   # 只跑一套
+make check          # 85 条，四套环境
+make test-central   # 只跑一套
 ```
 
 ## 改这里必须跑什么
 
 ```sh
-make -C work/knowledge/shared check            # 本仓 85 条
-make -C work/knowledge/admin  check            # 下游消费者 + server.lume type-check
+make check            # 本仓 85 条
+make -C ../kb-auth check   # 下游消费者 + server.lume type-check（在 kb-auth 仓库运行）
 # 再加各消费站点自己的 access-test（真实 shim 回归）
 ```
 
