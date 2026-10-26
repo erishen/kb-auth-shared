@@ -1,0 +1,28 @@
+// shared —— 通用 JSON 安全解析层（供 work/knowledge/* 的 ABAC/管理面复用）
+//
+// lume 语义要点（v0.4.0+）：
+// - json() 解析失败会置起 sticky VM error，handler 最终会 500——必须用
+//   try() 接住，坏数据才能优雅降级（404/空列表），不能只判 null。
+// - try() 返回固定双键 {ok, err}；成员访问 m.xxx 在键缺失时也会抛 sticky
+//   error，判 err/ok 必须用宽容的 get(m, k, def)。
+// - read_file 缺失/不可读返回 null（不是空字符串）。
+//
+// 本模块把「读文件 + 解析 + 告警 + 降级」收敛为一个函数：
+//   safe_json(raw, label) → 解析结果（ok 值），失败/缺失 → null（已打告警）
+//
+// 各项目的 lib/json.lume 只需 `import <shared>/json.lume as j; export func
+// safe_json(...) { return j.safe_json(...); }` 做一层转发（或直接 import 本
+// 模块用 j.safe_json），保证全仓一份实现。
+
+export func safe_json(raw, label) {
+  if (raw == null) {
+    print("警告: " + label + " 缺失或不可读，按空数据处理");
+    return null;
+  }
+  let r = try(() => json(raw));
+  if (get(r, "err", null) != null) {
+    print("警告: " + label + " 解析失败(内容损坏?)，按空数据处理");
+    return null;
+  }
+  return get(r, "ok", null);
+}

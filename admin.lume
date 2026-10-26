@@ -1,0 +1,415 @@
+// shared/admin.lume —— 通用管理端（账号 CRUD + 密码哈希热重载 + 审计）
+//
+// 供 work/knowledge/* 各 lume 项目复用。存储分两层（数据源可写分离）：
+//   data/accounts.json      镜像种子（只读，初始账号属性）
+//   STATE_DIR/accounts.json 运行时账号权威（管理端可写；首次自动从种子拷贝）
+//   STATE_DIR/htpasswd.map.json 账号→SHA-512 哈希（JSON map，entrypoint 启动时
+//                               优先用它生成 AUTH_FILE → 重启不丢在线改的账号）
+//   STATE_DIR/abac-audit.jsonl  审计日志（DENY + 管理动作留痕）
+//   AUTH_FILE               当前生效认证文件（重建后 agent-httpd 热重载即时生效）
+//
+// 路径以 env 为准（容器 entrypoint 注入），dev 下落回 CWD 相对路径：
+//   STATE_DIR     缺省 "state"
+//   AUTH_FILE     缺省 "auth/htpasswd"
+//
+// 密码只以强哈希（$6$ sha512）落盘，不存明文；列表接口不回传哈希。
+// crypt_sha512 依赖 glibc crypt(3)：容器内可用；macOS（DES-only）会报错，
+// 管理端在本机 make dev 下新增/重置密码返回明确错误，其余读操作不受影响。
+//
+// ============ 中央身份模式（AUTHORITIES_DIR 已设）下的写保护 ============
+// 挂了 kb-auth 共享卷的项目，身份与密码哈希的权威已经搬到中央：本地再写
+// STATE_DIR/accounts.json 既改不动中央 htpasswd（只读挂载），也不会影响认证
+// （HTPASSWD_FILE 指向中央那份）——「点了保存、什么都没发生」比报错更糟。
+// 所以本文件在中央模式下拒绝一切写操作，把调用方指回 kb-auth；本地只保留
+// 「学段授权表」这一件事（stages/grade/title，由项目自己的 accounts.json 维护）。
+// kb-auth 服务本身不设 AUTHORITIES_DIR（它就是权威、自己写卷），故不受影响。
+import "abac.lume" as abac;
+import "json.lume" as js;
+
+// 写操作统一出口：中央模式下返回 501，本地模式下返回 null 表示「继续干活」。
+func central_write_guard() {
+  if (not abac.central_mode()) { return null; }
+  return { status: 501, body: {
+    err: "本项目已接入集中身份（AUTHORITIES_DIR=" + abac.central_dir() + "）：账号与密码请在 kb-auth 管理端维护；本地 accounts.json 只管学段授权（stages/grade/title）",
+  } };
+}
+
+// 诊断/展示用：当前是否中央模式（项目 server.lume 可以直接打出来）。
+export func central_mode() { return abac.central_mode(); }
+
+// 合并视图（中央身份 + 本地授权），只读。中央模式下项目管理端要列的是「谁登录
+// 得了、各自能看哪些学段」，那正是 abac.accounts_map() 算出来的东西。
+export func accounts_view() { return abac.accounts_map(); }
+
+// ============ 0. 路径（模块加载期求值一次） ============
+let STATE_DIR = "state";
+if (env("STATE_DIR") != null) { STATE_DIR = str(env("STATE_DIR")); }
+let AUTH_FILE = "auth/htpasswd";
+if (env("HTPASSWD_FILE") != null) { AUTH_FILE = str(env("HTPASSWD_FILE")); }
+let ACCOUNTS_FILE = STATE_DIR + "/accounts.json";
+let LINES_FILE = STATE_DIR + "/htpasswd.map.json";
+
+// ============ 1. 存储 ============
+
+// 确保 STATE_DIR 可写目录存在；首次从镜像种子 data/accounts.json 拷贝（幂等）。
+export func ensure_state() {
+  let m = try(() => mkdir(STATE_DIR));
+  if (get(m, "err", null) != null) {
+    // 目录已存在时 mkdir 报错，忽略
+  }
+  let cur = read_file(ACCOUNTS_FILE);
+  if (cur == null) {
+    let seed = read_file("data/accounts.json");
+    if (seed == null) { seed = read_file("data/accounts.json.example"); }
+    if (seed == null) {
+      seed = "{\"accounts\":{}}";
+    }
+    write_file(ACCOUNTS_FILE, seed);
+  }
+}
+
+// 读运行时账号（STATE_DIR 缺失时回退种子 data/）。null = 都不可读。
+export func read_accounts() {
+  ensure_state();
+  let raw = read_file(ACCOUNTS_FILE);
+  if (raw == null) {
+    raw = read_file("data/accounts.json");
+  }
+  if (raw == null) {
+    raw = read_file("data/accounts.json.example");
+  }
+  if (raw == null) { return null; }
+  let d = js.safe_json(raw, ACCOUNTS_FILE);
+  if (d == null) { return null; }
+  return get(d, "accounts", {});
+}
+
+// 写运行时账号（全量覆盖账号表；调用方先 read 再改再写）。
+// ⚠️ 但顶层不能整体重造：这些 accounts.json 是人手维护的种子，JSON 不支持注释，
+//    大家用 "comment" 字段写说明（math/chinese/admin 三份种子都是这个写法）。
+//    原实现写死 stringify({accounts: acc})，第一次经 API 改账号就会把所有说明抹掉
+//    ——冷跑 /api/admin/grants 时实测到的。这里保留 accounts 之外的顶层键。
+export func save_accounts(acc) {
+  ensure_state();
+  let d = {};
+  let raw = read_file(ACCOUNTS_FILE);
+  if (raw != null) {
+    let old = js.safe_json(raw, ACCOUNTS_FILE);
+    if (old != null) {
+      let ks = keys(old);
+      let i = 0;
+      while (i < len(ks)) {
+        let k = get(ks, i);
+        if (k != "accounts") { put(d, k, get(old, k)); }
+        i = i + 1;
+      }
+    }
+  }
+  put(d, "accounts", acc);
+  write_file(ACCOUNTS_FILE, stringify(d));
+}
+
+// 读现有哈希映射（user → hash），文件缺失/损坏 → 空 map。
+export func read_hashes() {
+  let raw = read_file(LINES_FILE);
+  if (raw == null) { return {}; }
+  let d = js.safe_json(raw, LINES_FILE);
+  if (d == null) { return {}; }
+  return d;
+}
+
+// 重建认证三件套：accounts.json 的 password_hash + htpasswd.map.json（持久源）
+// + AUTH_FILE（生效文件，agent-httpd 热重载即时生效）。
+// 这是真正的落盘写口，所以中央模式在这里也拦一道（三个 CRUD 入口之外还有别人
+// 直接调它的话，同样不该去写一份注定不生效的认证文件）。
+export func rebuild_auth(acc, hashes) {
+  let g = central_write_guard();
+  if (g != null) { return { err: str(get(get(g, "body", {}), "err", "中央身份模式：本地不写认证文件")) }; }
+  // 1) 汇总最终 hash 并回写账号记录（保证 accounts.json 是权威）
+  let ks = keys(acc);
+  let i = 0;
+  while (i < len(ks)) {
+    let u = get(ks, i);
+    let rec = get(acc, u);
+    let h = str(get(rec, "password_hash", ""));
+    if (h == "") {
+      h = str(get(hashes, u, ""));
+      if (h != "") { put(rec, "password_hash", h); }
+    }
+    i = i + 1;
+  }
+  save_accounts(acc);
+  // 2) 写 htpasswd.map.json（entrypoint 启动用它，重启不丢）
+  let hm = {};
+  let j = 0;
+  while (j < len(ks)) {
+    let u = get(ks, j);
+    let h = str(get(get(acc, u), "password_hash", ""));
+    if (h != "") { put(hm, u, h); }
+    j = j + 1;
+  }
+  write_file(LINES_FILE, stringify(hm));
+  // 3) 重建 AUTH_FILE（user:hash 每行；取 AUTH_FILE 父目录后 mkdir）
+  let p = str(AUTH_FILE);
+  let last_slash = -1;
+  let pi = 0;
+  while (pi < len(p)) {
+    if (substr(p, pi, 1) == "/") { last_slash = pi; }
+    pi = pi + 1;
+  }
+  if (last_slash > 0) {
+    let m = try(() => mkdir(substr(p, 0, last_slash)));
+    if (get(m, "err", null) != null) { /* 已存在 */ }
+  }
+  let body = "";
+  let k = 0;
+  while (k < len(ks)) {
+    let u = get(ks, k);
+    let h = str(get(get(acc, u), "password_hash", ""));
+    if (h != "") {
+      body = body + u + ":" + h + "\n";
+    }
+    k = k + 1;
+  }
+  let w = try(() => write_file(AUTH_FILE, body));
+  if (get(w, "err", null) != null) {
+    return { err: "AUTH_FILE 写入失败（容器外开发环境无该目录，认证未开启时可忽略）" };
+  }
+  return { ok: true, accounts: len(ks) };
+}
+
+// ============ 2. 账号 CRUD ============
+
+// 列表（去哈希：哈希是敏感物，前端不需要）。
+// grant 字段是给人看的授权状态：中央模式下「有身份、本地没授权」和「授权全库」
+// 都表现为 stages=[]，不标出来的话管理端根本分不清该给谁补授权。
+// acc 传 null（账号表读不到）时返回空列表而不是崩：lume 里 keys(null) 是运行期
+// 报错，会把整个请求 handler 打挂。
+export func accounts_list(acc) {
+  if (acc == null) { return []; }
+  let ks = keys(acc);
+  let out = [];
+  let i = 0;
+  while (i < len(ks)) {
+    let u = get(ks, i);
+    let rec = get(acc, u);
+    push(out, {
+      user: u,
+      role: str(get(rec, "role", "student")),
+      stages: get(rec, "stages", []),
+      grade: int(get(rec, "grade", 0)),
+      title: str(get(rec, "title", "")),
+      grant: abac.grant_of(rec),
+    });
+    i = i + 1;
+  }
+  return out;
+}
+
+// 角色合法性（防手滑把角色写成未知值——未知角色等级 0，账号会被锁死）。
+export func valid_role(role) {
+  return role == "student" or role == "teacher" or role == "admin";
+}
+
+// 新增账号。payload: {user, role, stages, grade, title, password}
+export func account_create(user, payload) {
+  let g = central_write_guard();
+  if (g != null) { return g; }
+  let u = replace(str(get(payload, "user", "")), " ", "");
+  if (u == "") { return { status: 400, body: { err: "账号名不能为空" } }; }
+  if (replace(u, ":", "") != u or replace(u, ",", "") != u) {
+    return { status: 400, body: { err: "账号名不能含冒号或逗号（htpasswd/CSV 格式约束）" } };
+  }
+  let acc = read_accounts();
+  if (acc == null) { return { status: 500, body: { err: "账号文件不可读" } }; }
+  if (get(acc, u, null) != null) {
+    return { status: 409, body: { err: "账号 " + u + " 已存在" } };
+  }
+  let role = str(get(payload, "role", "student"));
+  if (not valid_role(role)) {
+    return { status: 400, body: { err: "角色必须是 student/teacher/admin" } };
+  }
+  let pw = str(get(payload, "password", ""));
+  if (pw == "") {
+    return { status: 400, body: { err: "新账号必须设置密码" } };
+  }
+  let rec = {
+    role: role,
+    stages: get(payload, "stages", []),
+    grade: int(get(payload, "grade", 0)),
+    title: str(get(payload, "title", "")),
+  };
+  let c = try(() => crypt_sha512(pw));
+  if (get(c, "err", null) != null) {
+    return { status: 500, body: { err: "密码哈希生成失败（crypt_sha512 需 glibc：请用 docker 部署环境）" } };
+  }
+  put(rec, "password_hash", get(c, "ok"));
+  put(acc, u, rec);
+  let r = rebuild_auth(acc, read_hashes());
+  if (get(r, "err", null) != null) { return { status: 500, body: r }; }
+  abac.audit_write({ action: "admin:create", actor: str(user), target: u, at: now() });
+  return { ok: true };
+}
+
+// 更新账号属性/重置密码。payload: {role?, stages?, grade?, title?, password?}
+export func account_update(user, target, payload) {
+  let g = central_write_guard();
+  if (g != null) { return g; }
+  let acc = read_accounts();
+  if (acc == null) { return { status: 500, body: { err: "账号文件不可读" } }; }
+  let rec = get(acc, target, null);
+  if (rec == null) { return { status: 404, body: { err: "账号 " + target + " 不存在" } }; }
+  if (get(payload, "role", null) != null) {
+    let role = str(get(payload, "role", ""));
+    if (not valid_role(role)) {
+      return { status: 400, body: { err: "角色必须是 student/teacher/admin" } };
+    }
+    put(rec, "role", role);
+  }
+  if (get(payload, "stages", null) != null) {
+    put(rec, "stages", get(payload, "stages", []));
+  }
+  if (get(payload, "grade", null) != null) {
+    put(rec, "grade", int(get(payload, "grade", 0)));
+  }
+  if (get(payload, "title", null) != null) {
+    put(rec, "title", str(get(payload, "title", "")));
+  }
+  let pw = str(get(payload, "password", ""));
+  if (pw != "") {
+    let c = try(() => crypt_sha512(pw));
+    if (get(c, "err", null) != null) {
+      return { status: 500, body: { err: "密码哈希生成失败（crypt_sha512 需 glibc：请用 docker 部署环境）" } };
+    }
+    put(rec, "password_hash", get(c, "ok"));
+  }
+  put(acc, target, rec);
+  let r = rebuild_auth(acc, read_hashes());
+  if (get(r, "err", null) != null) { return { status: 500, body: r }; }
+  abac.audit_write({ action: "admin:update", actor: str(user), target: target, at: now() });
+  return { ok: true };
+}
+
+// 删除账号。admin 账号不可删（保证总有管理入口）。
+export func account_delete(user, target) {
+  let g = central_write_guard();
+  if (g != null) { return g; }
+  if (target == "admin") {
+    return { status: 400, body: { err: "admin 账号不可删除（管理入口兜底）" } };
+  }
+  let acc = read_accounts();
+  if (acc == null) { return { status: 500, body: { err: "账号文件不可读" } }; }
+  if (get(acc, target, null) == null) {
+    return { status: 404, body: { err: "账号 " + target + " 不存在" } };
+  }
+  // lume 无 map 删除内建：重建 map 跳过目标
+  let acc2 = {};
+  let ks = keys(acc);
+  let i = 0;
+  while (i < len(ks)) {
+    let k = get(ks, i);
+    if (k != target) { put(acc2, k, get(acc, k)); }
+    i = i + 1;
+  }
+  let r = rebuild_auth(acc2, read_hashes());
+  if (get(r, "err", null) != null) { return { status: 500, body: r }; }
+  abac.audit_write({ action: "admin:delete", actor: str(user), target: target, at: now() });
+  return { ok: true };
+}
+
+// 审计日志（原始 jsonl 文本，前端按行解析展示；管理动作与 DENY 都留痕）。
+export func audit_raw() {
+  return abac.audit_read_all();
+}
+
+// ============ 3. 本地学段授权（中央模式下唯一允许的写口） ============
+//
+// 为什么单独立一组：接了中央卷之后，身份/密码归 kb-auth（上面三个 CRUD 会返回
+// 501），但「这个账号在本项目能看哪些学段」仍然归本项目自己管（词表按项目不同）。
+// 所以本地总要留一个能写 stages 的口——否则就只能手编 state/accounts.json。
+//
+// 与 account_update 的三条硬边界：
+//   1. 只写本地层（STATE_DIR/accounts.json），绝不写 role、绝不碰 password/哈希；
+//   2. 绝不调用 rebuild_auth → 不会重写 htpasswd / htpasswd.map.json（那是中央的事）；
+//   3. 明确拒收 role/password 字段（宁可 400 也不要静默忽略——静默忽略会让前端
+//      以为改成功了）。
+// 中央模式下还要求「这个身份在中央存在」，否则 404：给一个登不进来的账号配授权
+// 没有意义，而且会把本地表堆成一堆孤儿条目。
+
+// 列出本地授权视图。中央模式下列的是**合并视图**（含"有身份未授权"的行，
+// grant=central-only），否则管理端看不见该补谁的授权。
+export func grants_list() {
+  if (abac.central_mode()) { return accounts_list(abac.accounts_map()); }
+  return accounts_list(read_accounts());
+}
+
+// 写某账号在本项目的学段授权。payload: {stages?, grade?, title?}
+export func grant_update(user, target, payload) {
+  let bad = str(get(payload, "role", "<absent>"));
+  if (bad != "<absent>") {
+    return { status: 400, body: { err: "grants 端点不接受 role（角色属中央 kb-auth 管）" } };
+  }
+  if (get(payload, "password", null) != null or get(payload, "password_hash", null) != null) {
+    return { status: 400, body: { err: "grants 端点不接受 password/password_hash（密码属 kb-auth 管）" } };
+  }
+  if (target == "") { return { status: 400, body: { err: "账号名不能为空" } }; }
+
+  let local = read_accounts();
+  if (local == null) { return { status: 500, body: { err: "本地授权表不可读" } }; }
+
+  // 中央模式下：身份权威在中央，本地不该给登不进来的账号建条目。
+  if (abac.central_mode()) {
+    let merged = abac.accounts_map();
+    if (merged == null) { return { status: 503, body: { err: "中央身份表读不到，暂不能改授权" } }; }
+    if (get(merged, target, null) == null) {
+      return { status: 404, body: { err: "kb-auth 里没有账号 " + target + "：先在中央建号，再回来配学段授权" } };
+    }
+  }
+
+  let rec = get(local, target, null);
+  if (rec == null) { rec = { role: "student", stages: [], grade: 0, title: target }; }
+
+  if (get(payload, "stages", null) != null) {
+    let st = get(payload, "stages", []);
+    // 列表/映射的判别沿用 abac.lume 里那套「对值做 map 取值是否报错」：
+    // 列表取字符串键会 err，map 取 "role" 不会。这里用来挡住 stages 传成对象。
+    let chk = try(() => get(st, "role", null));
+    if (get(chk, "err", null) == null) {
+      return { status: 400, body: { err: "stages 必须是学段 id 数组，如 [\"junior\"]" } };
+    }
+    // ⚠️ 本引擎里 stages=[] 的语义是「全库可见」，不是「什么都不给」。
+    //    所以空数组必须显式确认，否则「清空授权」这个再自然不过的前端操作就会
+    //    变成静默提权。要撤销请用 grant_revoke（删本地条目 → 回到 central-only）。
+    if (len(st) == 0 and str(get(payload, "confirm_all", "")) != "true") {
+      return { status: 400, body: { err: "stages=[] 在本引擎表示「全库可见」而非「无授权」；确要放开全库请带 confirm_all=true，想撤销请用 DELETE /api/admin/grants/:user" } };
+    }
+    put(rec, "stages", st);
+  }
+  if (get(payload, "grade", null) != null) { put(rec, "grade", int(get(payload, "grade", 0))); }
+  if (get(payload, "title", null) != null) { put(rec, "title", str(get(payload, "title", ""))); }
+  put(local, target, rec);
+  save_accounts(local);
+  abac.audit_write({ action: "grant:update", actor: str(user), target: target,
+                     stages: get(rec, "stages", []), at: now() });
+  return { ok: true, user: target, stages: get(rec, "stages", []),
+           grant: abac.grant_of(rec) };
+}
+
+// 撤销某账号的本地授权：**删掉本地条目**，让它回到 central-only（学段全 DENY）。
+// 不能用 stages=[] 表达——那是「全库」。账号身份本身仍属 kb-auth，这里不删号。
+export func grant_revoke(user, target) {
+  let local = read_accounts();
+  if (local == null) { return { status: 500, body: { err: "本地授权表不可读" } }; }
+  if (get(local, target, null) == null) { return { status: 404, body: { err: "本地没有 " + target + " 的授权条目" } }; }
+  let kept = {};
+  let ks = keys(local);
+  let i = 0;
+  while (i < len(ks)) {
+    let k = get(ks, i);
+    if (k != target) { put(kept, k, get(local, k)); }
+    i = i + 1;
+  }
+  save_accounts(kept);
+  abac.audit_write({ action: "grant:revoke", actor: str(user), target: target, at: now() });
+  return { ok: true, user: target, grant: "central-only" };
+}

@@ -1,0 +1,9 @@
+{
+  "comment": "模式 local 用的本地表：与 math/data/accounts.json 同构（未接入中央时的现状）。admin 的 stages=[] 表示「全库」——这是引擎 v1 就有的语义，回归用例依赖它。（JSON 不能写 // 注释，说明一律放 comment 字段）",
+  "accounts": {
+    "admin": { "role": "admin", "stages": [], "grade": 12, "title": "管理员（全库）" },
+    "alice": { "role": "student", "stages": ["primary-math"], "grade": 6, "title": "小学生" },
+    "dave": { "role": "student", "stages": ["primary-math", "middle-school"], "grade": 8, "title": "初中生" },
+    "bob": { "role": "teacher", "stages": ["middle-school", "college-entrance"], "grade": 0, "title": "家教" }
+  }
+}

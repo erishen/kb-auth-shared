@@ -1,0 +1,375 @@
+// shared/abac.lume —— 通用 ABAC（Attribute-Based Access Control）决策引擎
+//
+// 供 work/knowledge/* 各 lume 项目复用的账号与权限层核心（与
+// spring-abac / lume examples/abac 同构）。各项目的 lib/access.lume 退化为一层
+// 薄 shim：`import <shared>/abac.lume` + `abac.configure({resources, stageResource})`
+// 注入项目特有的资源表与学段资源名，再 re-export 引擎导出，调用点 0 改动。
+//
+// 属性模型（两层，见下「路径约定」）：
+//   主体 subject    身份层 { role, password_hash } + 授权层 { stages, grade, title }
+//   资源 resource   configure() 注入的 RESOURCES 表：{ res: { actions, min_role } }
+//   动作 action      read / manage
+//
+// 决策链 decide()（deny-by-default，任一 DENY 即短路；DENY 自动写审计）：
+//   1. 认证关闭（user == null，本机 make dev）→ PERMIT 不限制
+//   2. 资源类型未知                              → DENY
+//   3. 动作不在资源允许集                         → DENY
+//   4. 账号未登记 / 账号表读不到（fail-closed）    → DENY
+//   5. 角色等级低于资源最低角色                   → DENY
+//   6. 学段资源（stageResource）且未授予该学段     → DENY
+//
+// ============ 路径约定（v2：中央身份 + 本地授权） ============
+//
+// 各知识库项目的学段词表互不相同（math=primary-math/…，chinese=primary/junior/
+// senior/univ），单一 accounts.json 无法同时驱动多个项目，故把「身份」与「授权」
+// 拆成两层，仍由本项目进程本地跑 decide()（零网络）：
+//
+//   STATE_DIR        本地可写：授权层 accounts.json + 审计 + 本地 htpasswd.map.json
+//                    读 env("STATE_DIR")，缺省 "state"（相对 CWD）
+//   AUTHORITIES_DIR  中央身份卷（kb-auth 的 kb-auth-shared，项目 ro 挂载）
+//                    设置后：role 以中央为准、stages 以本地为准、中央的 stages 忽略
+//                    未设置 → 单一本地文件，行为与 v1 完全一致（回退安全）
+//   AUDIT_PATH       STATE_DIR/abac-audit.jsonl
+//
+// 中央模式（AUTHORITIES_DIR 非空）下的合并规则（accounts_map 的实现）：
+//   中央有 + 本地有  → role←中央；stages/grade/title←本地
+//   中央有 + 本地无  → role←中央；打 _central_only 标记 = 未授予任何学段
+//                      （角色门槛照常生效，但学段资源一律 DENY）
+//   中央无 + 本地有  → 丢弃（中央 htpasswd 里没这个账号，本来就登录不进来；
+//                      留着只会让本地残留条目意外出现在决策里）
+//   ⚠️ 不能用 stages=[] 表示「未授予」：本引擎里 stages=[] 的语义是「全库」（见
+//      visible_stages 第 3 步），所以必须用显式 _central_only 标记区分。
+//
+// 账号属性文件：
+//   中央 accounts.json  AUTHORITIES_DIR/accounts.json（只读，kb-auth 独占写）
+//   本地 accounts.json  STATE_DIR/accounts.json（权威，项目本地管理端可写）
+//                       → 缺省回退 data/accounts.json（镜像种子）
+//   旧格式（账号→学段数组）自动升级为 { role:"student", stages, grade:0 }。
+
+import "json.lume" as js;
+
+// ============ 0. 路径 & 配置（模块加载期求值一次） ============
+
+// STATE_DIR：容器 entrypoint 注入（chinese=/app/state，math=/app/state 或相对 state），
+// 本机 make dev 未注入 → 缺省 "state"（相对 CWD）。
+let STATE_DIR = "state";
+if (env("STATE_DIR") != null) { STATE_DIR = str(env("STATE_DIR")); }
+
+// AUTHORITIES_DIR：中央身份卷（kb-auth 的共享卷，项目 ro 挂载）。设置后
+// accounts_map() 走「中央定身份 + 本地定学段」的两层合并；未设置 → 单一本地
+// 文件（项目自管账号的老行为），所有新分支全部不激活。
+let AUTHORITIES_DIR = "";
+if (env("AUTHORITIES_DIR") != null) { AUTHORITIES_DIR = str(env("AUTHORITIES_DIR")); }
+
+// 是否处于中央身份模式。shared/admin.lume 用它拒绝本地账号写操作（写了也不
+// 影响中央 htpasswd，静默失效比报错更糟），项目诊断也可以打出来。
+export func central_mode() { return AUTHORITIES_DIR != ""; }
+export func central_dir() { return AUTHORITIES_DIR; }
+export func state_dir() { return STATE_DIR; }
+
+// 审计落盘位置。默认 STATE_DIR/abac-audit.jsonl（生产/开发都不必管它）；
+// ABAC_AUDIT_PATH 仅供单测把审计引到临时目录，避免污染 fixtures 目录——它是
+// 唯一需要这个旋钮的地方，别拿它当运行时配置用。
+let AUDIT_PATH = STATE_DIR + "/abac-audit.jsonl";
+if (env("ABAC_AUDIT_PATH") != null) { AUDIT_PATH = str(env("ABAC_AUDIT_PATH")); }
+
+// 配置容器：模块级引用固定为 {}，configure() 只 put 进内容、绝不重新绑定 let
+// （lume 语义下 func 内对模块级 let 重绑定不可靠，put 改 map 内容则一定生效）。
+// 默认空资源表 → decide 对一切资源 DENY；stageResource 空串 → 跳过学段白名单步。
+let RESOURCES = {};
+let STAGE_CFG = {};   // { resource: "" }
+
+export func configure(cfg) {
+  let rs = get(cfg, "resources", {});
+  let rks = keys(rs);
+  let ri = 0;
+  while (ri < len(rks)) {
+    let rk = get(rks, ri);
+    put(RESOURCES, rk, get(rs, rk));
+    ri = ri + 1;
+  }
+  let sr = get(cfg, "stageResource", "");
+  put(STAGE_CFG, "resource", str(sr));
+}
+
+// ============ 1. 属性源 ============
+
+// 角色等级：数值越大权限越高（未知角色 → 0，低于 student）。
+let ROLE_LEVEL = { student: 1, teacher: 2, admin: 3 };
+
+// 把一份 accounts 对象规整成 {user: record}；旧格式（账号→学段数组）升级为
+// student 记录。注意：新/旧格式的判别沿用「对值做 map 取值是否报错」——列表取
+// 字符串键会 err，map 取 "role" 不会。
+func normalize_accounts(acc) {
+  let out = {};
+  let ks = keys(acc);
+  let i = 0;
+  while (i < len(ks)) {
+    let k = get(ks, i);
+    let v = get(acc, k);
+    let chk = try(() => get(v, "role", null));
+    if (get(chk, "err", null) == null) {
+      put(out, k, v);
+    } else {
+      put(out, k, { role: "student", stages: v, grade: 0, title: k });
+    }
+    i = i + 1;
+  }
+  return out;
+}
+
+// 读某目录下的 accounts.json。文件不存在 / 内容损坏 → null（由调用方决定降级
+// 方向；认证开启时 decide 会把 null 当 fail-closed，见 decide_with 第 4 步）。
+// 不在「state 损坏」时偷偷回退到 data 种子：那会把镜像里的旧授权当现行业权。
+func load_layer(dir) {
+  if (dir == "") { return null; }
+  let raw = read_file(dir + "/accounts.json");
+  if (raw == null) { return null; }
+  let d = js.safe_json(raw, dir + "/accounts.json");
+  if (d == null) { return null; }
+  return normalize_accounts(get(d, "accounts", {}));
+}
+
+// 本地层：STATE_DIR/accounts.json（运行时权威，项目本地管理端可写）优先，
+// 缺失才回退 data/accounts.json（镜像种子）。
+func local_layer() {
+  let m = load_layer(STATE_DIR);
+  if (m != null) { return m; }
+  return load_layer("data");
+}
+
+// 授权标记（"all" | "local" | "central-only"）：
+//   "all"           不限学段（stages 显式为 []，沿用 v1 语义）
+//   "local"         本地白名单生效
+//   "central-only"  中央有这个身份、本地从没授权过 → 任何学段都 DENY
+// 为什么非要用显式标记：本引擎里 stages=[] 表示「全库」，所以「没授权」绝不能
+// 用空列表表达，否则中央新建一个学生账号就在所有项目里变成全库可见。
+// _grant 只在中央模式下由 accounts_map() 在内存里合成；本地模式没有这个字段，
+// 就按 stages 推导，保证两种模式下管理端拿到的 grant 含义一致。
+export func grant_of(rec) {
+  let g = str(get(rec, "_grant", ""));
+  if (g != "") { return g; }
+  if (len(get(rec, "stages", [])) == 0) { return "all"; }
+  return "local";
+}
+
+// 有效账号表。
+//   本地模式（AUTHORITIES_DIR 未设）→ 就是本地那份，行为与抽取前完全一致。
+//   中央模式 → 以中央账号集为定义域做两层合并：
+//     role   ← 中央（唯一权威，kb-auth 管理端维护）
+//     stages ← 本地授权表（中央的 stages 一律忽略：词表按项目不同）
+//     grade/title ← 本地优先，缺失回落中央（纯展示字段，不参与决策）
+//     中央无 + 本地有 → 丢弃（中央 htpasswd 没这账号，本来就登不进来）
+//     中央有 + 本地无 → _grant="central-only"，学段全 DENY，角色门槛照常
+//   中央表读不到 → null（认证开启时 fail-closed，绝不因读不到就放行）。
+export func accounts_map() {
+  let local = local_layer();
+  if (AUTHORITIES_DIR == "") {
+    if (local == null) { print("警告: 账号属性读不到（认证开启时一律 DENY）"); }
+    return local;
+  }
+  let central = load_layer(AUTHORITIES_DIR);
+  if (central == null) {
+    print("警告: 中央身份表读不到 AUTHORITIES_DIR=" + AUTHORITIES_DIR + "（认证开启时一律 DENY）");
+    return null;
+  }
+  let out = {};
+  let ks = keys(central);
+  let i = 0;
+  while (i < len(ks)) {
+    let u = get(ks, i);
+    let c = get(central, u);
+    let rec = {
+      role: str(get(c, "role", "student")),
+      grade: int(get(c, "grade", 0)),
+      title: str(get(c, "title", "")),
+      stages: [],
+      _grant: "central-only",
+    };
+    if (local != null) {
+      let l = get(local, u, null);
+      if (l != null) {
+        let wl = get(l, "stages", []);
+        put(rec, "stages", wl);
+        put(rec, "grade", int(get(l, "grade", get(c, "grade", 0))));
+        put(rec, "title", str(get(l, "title", get(c, "title", ""))));
+        if (len(wl) > 0) { put(rec, "_grant", "local"); } else { put(rec, "_grant", "all"); }
+      }
+    }
+    put(out, u, rec);
+    i = i + 1;
+  }
+  return out;
+}
+
+// 当前登录账号（Basic Auth 关闭 → null）。req map 由 bridge.c 按请求解码
+// Authorization 头注入 "user" key。
+export func current_user(req) {
+  return get(req, "user", null);
+}
+
+// 账号主体属性；未登记/认证关闭/数据缺失 → null。
+export func subject_of(user) {
+  if (user == null) { return null; }
+  let accounts = accounts_map();
+  if (accounts == null) { return null; }
+  return get(accounts, user, null);
+}
+
+// 该账号可见学段 id 列表；null = 不限制（认证关闭 / 全库授权）。
+// 未登记账号、或中央模式下本地从未授权的账号 → []（fail-closed，看不到任何学段）。
+export func visible_stages(user) {
+  if (user == null) { return null; }
+  let accounts = accounts_map();
+  if (accounts == null) { return []; }
+  let rec = get(accounts, user, null);
+  if (rec == null) { return []; }
+  if (grant_of(rec) == "central-only") { return []; }
+  let wl = get(rec, "stages", []);
+  if (len(wl) == 0) { return null; }
+  return wl;
+}
+
+// 学段是否对账号可见。
+export func stage_visible(user, stage_id) {
+  let vis = visible_stages(user);
+  if (vis == null) { return true; }
+  return list_contains(vis, stage_id);
+}
+
+export func list_contains(xs, x) {
+  let i = 0;
+  while (i < len(xs)) {
+    if (get(xs, i) == x) { return true; }
+    i = i + 1;
+  }
+  return false;
+}
+
+// ============ 2. 策略引擎 ============
+
+export type Decision = {
+  decision: string,   // "PERMIT" | "DENY"
+  reason: string,
+  subject: string,
+  resource: string,
+  action: string,
+};
+
+// 通用决策引擎：接受外部资源表 + 学段资源名（中央 admin 服务跨项目用）。
+export func decide_with(user, res, action, stage_id, res_table, stage_res): Decision {
+  let trace = "";
+
+  // 1) 认证关闭 → 不限制
+  if (user == null) {
+    trace = trace + "[auth off: unrestricted] ";
+    return { decision: "PERMIT", reason: trace, subject: "", resource: res, action: action };
+  }
+  // 2) 资源类型未知 → DENY
+  let res_meta = get(res_table, res, null);
+  if (res_meta == null) {
+    trace = trace + "[resource '" + res + "' unknown] ";
+    let d = { decision: "DENY", reason: trace, subject: str(user), resource: res, action: action };
+    audit_write(d);
+    return d;
+  }
+  // 3) 动作不在资源允许集 → DENY
+  let allowed = get(res_meta, "actions", []);
+  if (not list_contains(allowed, action)) {
+    trace = trace + "[action '" + action + "' not allowed on '" + res + "'] ";
+    let d = { decision: "DENY", reason: trace, subject: str(user), resource: res, action: action };
+    audit_write(d);
+    return d;
+  }
+  // 4) 账号属性表：读不到 = fail-closed DENY（不再降级放行）
+  //    原来这里是 `accounts == null → 跳过主体检查 → PERMIT`，等于「账号文件损坏
+  //    或被误删 → 全站放行」；中央模式下 AUTHORITIES_DIR 挂了却没读到文件也会命中
+  //    同一条路径。deny-by-default 是本引擎的立身前提，所以改成拒绝 + 留审计。
+  let accounts = accounts_map();
+  if (accounts == null) {
+    trace = trace + "[subject attributes unavailable (fail-closed)] ";
+    let d = { decision: "DENY", reason: trace, subject: str(user), resource: res, action: action };
+    audit_write(d);
+    return d;
+  }
+  let rec = get(accounts, user, null);
+  if (rec == null) {
+    trace = trace + "[subject '" + str(user) + "' unknown (fail-closed)] ";
+    let d = { decision: "DENY", reason: trace, subject: str(user), resource: res, action: action };
+    audit_write(d);
+    return d;
+  }
+  // 5) 角色门槛
+  let role = str(get(rec, "role", "student"));
+  let min_role = str(get(res_meta, "min_role", "student"));
+  if (role_level(role) < role_level(min_role)) {
+    trace = trace + "[role '" + role + "' below minimum '" + min_role + "'] ";
+    let d = { decision: "DENY", reason: trace, subject: str(user), resource: res, action: action };
+    audit_write(d);
+    return d;
+  }
+  // 6) 学段白名单
+  if (res == stage_res and stage_res != "") {
+    //    中央模式下这个身份在本地从没授权过 → 任何学段都不给看（角色门槛在上面
+    //    已经判过，所以非学段资源仍按角色正常放行）。
+    if (grant_of(rec) == "central-only") {
+      trace = trace + "[no local stage grant for '" + str(user) + "'] ";
+      let d = { decision: "DENY", reason: trace, subject: str(user), resource: res, action: action };
+      audit_write(d);
+      return d;
+    }
+    let wl = get(rec, "stages", []);
+    if (len(wl) > 0 and not list_contains(wl, stage_id)) {
+      trace = trace + "[stage '" + stage_id + "' not in whitelist] ";
+      let d = { decision: "DENY", reason: trace, subject: str(user), resource: res, action: action };
+      audit_write(d);
+      return d;
+    }
+  }
+  trace = trace + "[subject attributes ok: role '" + role + "'] ";
+  trace = trace + "[attributes satisfy policy] ";
+  return { decision: "PERMIT", reason: trace, subject: str(user), resource: res, action: action };
+}
+
+// 项目本地决策：用 configure() 注入的资源表（各项目 shim 调用点 0 改动）。
+export func decide(user, res, action, stage_id): Decision {
+  let stage_res = str(get(STAGE_CFG, "resource", ""));
+  return decide_with(user, res, action, stage_id, RESOURCES, stage_res);
+}
+
+export func role_level(role) {
+  return get(ROLE_LEVEL, role, 0);
+}
+
+// ============ 3. 审计（ABAC 硬要求：每次 DENY 留痕） ============
+
+// 追加一条决策记录到 AUDIT_PATH（flock 串行化，多 worker 安全）。
+export func audit_write(entry) {
+  if (get(entry, "at", null) == null) {
+    let e2 = {};
+    let ks = keys(entry);
+    let i = 0;
+    while (i < len(ks)) {
+      put(e2, get(ks, i), get(entry, get(ks, i)));
+      i = i + 1;
+    }
+    put(e2, "at", now());
+    entry = e2;
+  }
+  let m = try(() => mkdir(STATE_DIR));
+  if (get(m, "err", null) != null) { /* 已存在 */ }
+  let lf = try(() => lock_file(AUDIT_PATH, 3000));
+  if (get(lf, "err", null) != null) { /* 锁失败仍写，单用户场景可接受 */ }
+  let cur = read_file(AUDIT_PATH);
+  let base = "";
+  if (cur != null) { base = cur; }
+  write_file(AUDIT_PATH, base + stringify(entry) + "\n");
+  let uf = try(() => unlock_file());
+}
+
+// 读取全部审计（管理/调试用）。
+export func audit_read_all() {
+  let cur = read_file(AUDIT_PATH);
+  if (cur == null) { return ""; }
+  return cur;
+}
