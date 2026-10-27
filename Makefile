@@ -59,6 +59,9 @@ endef
 
 # 下载官方 release 的 lume 静态二进制到 .tools/（无需 root、不改 PATH）。
 # 让引擎可以脱离 monorepo 独立测试——它对下游是公共依赖，必须能单独验证。
+#
+# 下载用 --retry 5 --retry-all-errors：curl 默认只对「连接被拒」这类错误重试，
+# exit 56（接收数据失败）等传输中途错误不重试，网络抖动会让 bootstrap 整个失败。
 bootstrap:
 	@set -eu; \
 	  if [ -x "$(TOOLS_DIR)/bin/lume" ] && [ "$(FORCE)" != "1" ]; then \
@@ -78,7 +81,8 @@ bootstrap:
 	  echo "==> 下载 $(LUME_VERSION) / $$ASSET"; \
 	  mkdir -p "$(TOOLS_DIR)"; \
 	  tmp=$$(mktemp -d); \
-	  curl -fsSL --retry 3 -o "$$tmp/a.tar.gz" "$$BASE/$$ASSET.tar.gz"; \
+	  curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+	    -o "$$tmp/a.tar.gz" "$$BASE/$$ASSET.tar.gz"; \
 	  tar -xzf "$$tmp/a.tar.gz" -C "$$tmp"; \
 	  mkdir -p "$(TOOLS_DIR)/bin"; \
 	  install -m 0755 "$$tmp/$$ASSET/bin/lume" "$(TOOLS_DIR)/bin/lume"; \
