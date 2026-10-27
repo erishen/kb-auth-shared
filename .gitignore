@@ -2,6 +2,9 @@
 # 真实 ABAC 审计日志（含身份/动作，权限 600）
 state/
 
+# make bootstrap 下载的 lume 运行时（可重建，不入库）
+.tools/
+
 # ===== 系统 / 编辑器 =====
 .DS_Store
 *.swp

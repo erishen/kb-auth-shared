@@ -1,0 +1,62 @@
+name: check
+
+# 引擎单测 + 类型检查。
+#
+# kb-auth-shared 是被多个消费方 import 的库，改动会同时影响所有下游，
+# 所以每次 push / PR 都必须跑一遍四套环境（local / central / corrupt / grants）。
+#
+# lume 运行时取自 GitHub Release 的官方静态二进制，与本仓 `make bootstrap`
+# 下载的是同一份产物——CI 验证的就是外部用户实际拿到的东西。
+#
+# 为什么不用 `make test` 直接跑：CI 里 PATH 上有 lume，Makefile 的解析链
+# 会命中「PATH」这一档，无需额外传参。install 到 /usr/local/bin 即可。
+
+on:
+  push:
+  pull_request:
+
+env:
+  LUME_VERSION: v0.11.0
+
+jobs:
+  engine:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install lume runtime (official release)
+        run: |
+          set -eu
+          ASSET="lume-linux-x64"
+          BASE="https://github.com/erishen/lume/releases/download/${LUME_VERSION}"
+          mkdir -p "$RUNNER_TEMP/lume"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/lume/a.tar.gz"      "$BASE/$ASSET.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/lume/$ASSET.sha256" "$BASE/$ASSET.sha256"
+          cd "$RUNNER_TEMP/lume" && sha256sum -c "$ASSET.sha256"
+          tar -xzf a.tar.gz
+          sudo install -m755 "$ASSET/bin/lume" /usr/local/bin/lume
+          lume --version
+
+      - name: Engine tests (local / central / corrupt / grants) + type-check
+        run: make check
+
+      # 「零 PASS 即失败」的守卫在本仓 Makefile 里已加（make test 的四个子目标
+      # 都会检查），这里再补一道独立断言：确认断言总数达到预期下限。
+      # 防止将来某个子目标被重命名/跳过时，整条链静默退化成空跑。
+      - name: Assert expected assertion count
+        run: |
+          set -eu
+          out=$(make test 2>&1)
+          n=$(printf '%s\n' "$out" | grep -c '^PASS ')
+          echo "PASS 条数: $n"
+          test "$n" -ge 120 || { echo "断言数偏少（期望 ≥120），可能有用例被跳过"; exit 1; }
+
+      - name: Negative control (guard must fail when lume is missing)
+        run: |
+          # 防回归：如果哪天守卫被删掉，make test 会再次「0 PASS 报全部通过」。
+          # 这里把 lume 指到不存在的路径，期望非零退出。
+          set -eu
+          if make test LUME_DIR=/nonexistent >/dev/null 2>&1; then
+            echo "守卫失效：lume 缺失时 make test 仍然返回 0"; exit 1
+          fi
+          echo "守卫正常：lume 缺失时 make test 正确失败"

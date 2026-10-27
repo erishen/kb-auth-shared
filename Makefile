@@ -18,22 +18,83 @@
 # ——拿夹具当草稿纸的话，这一遍会把夹具改掉，后面 local/central 两遍就失真了。
 # 详见 tools/test-abac.lume 头注释。
 
-# lume 工具链位置：默认相对路径 ../../lume/lume，不存在时回退到 PATH 上的 lume；
-# 也可用 LUME_DIR=/abs/path 覆盖（make 不读 .env，请用环境变量或命令行）。
-LUME_DIR ?= ../../lume/lume
-ifeq ($(wildcard $(LUME_DIR)/bin/lume),)
-  LUME     := $(if $(shell command -v lume 2>/dev/null),lume,$(LUME_DIR)/bin/lume)
+# lume 工具链位置。解析优先级：
+#   ① LUME_DIR=/abs/path（命令行/环境变量，最高优先）
+#   ② PATH 上的 lume
+#   ③ ../../lume/lume（仅本地 monorepo 布局命中）
+#   ④ .tools/bin/lume（make bootstrap 下载的官方 release 二进制）
+# 都不成立时由 require_lume 给出可操作报错，而不是让子 make 报
+# "/bin/sh: ../../lume/lume/bin/lume: No such file or directory"。
+LUME_DIR ?=
+LUME     :=
+ifneq ($(LUME_DIR),)
+  LUME := $(LUME_DIR)/bin/lume
 else
-  LUME     := $(LUME_DIR)/bin/lume
+  LUME := $(shell command -v lume 2>/dev/null)
+  ifeq ($(LUME),)
+    ifneq ($(wildcard $(CURDIR)/../../lume/lume/bin/lume),)
+      LUME := $(abspath $(CURDIR)/../../lume/lume/bin/lume)
+    endif
+  endif
+  ifeq ($(LUME),)
+    ifneq ($(wildcard $(CURDIR)/.tools/bin/lume),)
+      LUME := $(CURDIR)/.tools/bin/lume
+    endif
+  endif
 endif
+
+LUME_VERSION ?= v0.11.0
+TOOLS_DIR    := $(CURDIR)/.tools
+
+define require_lume
+	@if [ -z "$(LUME)" ] || ! command -v "$(LUME)" >/dev/null 2>&1; then \
+	  echo "==> 找不到 lume 运行时（解析结果：$(or $(LUME),空)）"; \
+	  echo "    任选其一："; \
+	  echo "      make bootstrap                 （下载官方 release 二进制到 .tools/）"; \
+	  echo "      make <target> LUME_DIR=/abs/path/to/lume"; \
+	  echo "      或把 lume 装好并放进 PATH"; \
+	  exit 1; \
+	fi
+endef
+
+# 下载官方 release 的 lume 静态二进制到 .tools/（无需 root、不改 PATH）。
+# 让引擎可以脱离 monorepo 独立测试——它对下游是公共依赖，必须能单独验证。
+bootstrap:
+	@set -eu; \
+	  if [ -x "$(TOOLS_DIR)/bin/lume" ] && [ "$(FORCE)" != "1" ]; then \
+	    echo "==> lume 已存在: $(TOOLS_DIR)/bin/lume ($$($(TOOLS_DIR)/bin/lume --version 2>/dev/null || echo '?'))"; \
+	    echo "    如需重下: make bootstrap FORCE=1"; \
+	    exit 0; \
+	  fi; \
+	  OS=$$(uname -s); M=$$(uname -m); \
+	  case "$$OS" in \
+	    Linux)  case "$$M" in x86_64|amd64) A=x64 ;; aarch64|arm64) A=arm64 ;; *) echo "不支持的架构: $$M" >&2; exit 1 ;; esac; \
+	            ASSET="lume-linux-$$A" ;; \
+	    Darwin) case "$$M" in arm64) A=arm64 ;; x86_64) A=x64 ;; *) echo "不支持的架构: $$M" >&2; exit 1 ;; esac; \
+	            ASSET="lume-darwin-$$A" ;; \
+	    *) echo "不支持的系统: $$OS" >&2; exit 1 ;; \
+	  esac; \
+	  BASE="https://github.com/erishen/lume/releases/download/$(LUME_VERSION)"; \
+	  echo "==> 下载 $(LUME_VERSION) / $$ASSET"; \
+	  mkdir -p "$(TOOLS_DIR)"; \
+	  tmp=$$(mktemp -d); \
+	  curl -fsSL --retry 3 -o "$$tmp/a.tar.gz" "$$BASE/$$ASSET.tar.gz"; \
+	  tar -xzf "$$tmp/a.tar.gz" -C "$$tmp"; \
+	  mkdir -p "$(TOOLS_DIR)/bin"; \
+	  install -m 0755 "$$tmp/$$ASSET/bin/lume" "$(TOOLS_DIR)/bin/lume"; \
+	  rm -rf "$$tmp"; \
+	  echo "==> 完成: $(TOOLS_DIR)/bin/lume ($$($(TOOLS_DIR)/bin/lume --version))"
 
 # 审计写到临时目录，不污染 fixtures（引擎里的 ABAC_AUDIT_PATH 就是为此存在）。
 AUDIT := /tmp/kb-shared-abac-audit.jsonl
 FIX   := tools/fixtures
 
-.PHONY: test test-one test-local test-central test-corrupt check
+.PHONY: bootstrap test test-one test-local test-central test-corrupt test-grants check require-lume
 
-test: test-local test-central test-corrupt test-grants
+require-lume:
+	$(call require_lume)
+
+test: require-lume test-local test-central test-corrupt test-grants
 	@echo "==> 共享 ABAC 引擎单测全部通过"
 
 # 四套环境：
@@ -48,19 +109,22 @@ test-local:
 	@out=$$(ABAC_MODE=local STATE_DIR=$(FIX)/local-full \
 	  ABAC_AUDIT_PATH=$(AUDIT) $(LUME) tools/test-abac.lume 2>&1); \
 	echo "$$out"; \
-	if echo "$$out" | grep -q FAIL; then echo "==> local 单测失败"; exit 1; fi
+	if echo "$$out" | grep -q FAIL; then echo "==> local 单测失败"; exit 1; fi; \
+	  if ! echo "$$out" | grep -q "^PASS "; then echo "==> local 单测没有产出任何 PASS（lume 没跑起来？）"; exit 1; fi
 
 test-central:
 	@out=$$(ABAC_MODE=central STATE_DIR=$(FIX)/local-grant-b AUTHORITIES_DIR=$(FIX)/central \
 	  ABAC_AUDIT_PATH=$(AUDIT) $(LUME) tools/test-abac.lume 2>&1); \
 	echo "$$out"; \
-	if echo "$$out" | grep -q FAIL; then echo "==> central 单测失败"; exit 1; fi
+	if echo "$$out" | grep -q FAIL; then echo "==> central 单测失败"; exit 1; fi; \
+	  if ! echo "$$out" | grep -q "^PASS "; then echo "==> central 单测没有产出任何 PASS（lume 没跑起来？）"; exit 1; fi
 
 test-corrupt:
 	@out=$$(ABAC_MODE=corrupt STATE_DIR=$(FIX)/local-grant-b AUTHORITIES_DIR=$(FIX)/corrupt-central \
 	  ABAC_AUDIT_PATH=$(AUDIT) $(LUME) tools/test-abac.lume 2>&1); \
 	echo "$$out"; \
-	if echo "$$out" | grep -q FAIL; then echo "==> corrupt 单测失败"; exit 1; fi
+	if echo "$$out" | grep -q FAIL; then echo "==> corrupt 单测失败"; exit 1; fi; \
+	  if ! echo "$$out" | grep -q "^PASS "; then echo "==> corrupt 单测没有产出任何 PASS（lume 没跑起来？）"; exit 1; fi
 
 # grants 模式会真的写盘（grant_update / grant_revoke 是写口），所以 STATE_DIR 不能
 # 指夹具目录，得先把它拷到 /tmp 当草稿纸——否则单测会把夹具改掉，local/central
@@ -76,7 +140,8 @@ test-grants:
 	@out=$$(ABAC_MODE=grants STATE_DIR=$(GDIR) AUTHORITIES_DIR=$(FIX)/central \
 	  ABAC_AUDIT_PATH=$(GRANTS_T) $(LUME) tools/test-abac.lume 2>&1); \
 	echo "$$out"; \
-	if echo "$$out" | grep -q FAIL; then echo "==> grants 单测失败"; exit 1; fi
+	if echo "$$out" | grep -q FAIL; then echo "==> grants 单测失败"; exit 1; fi; \
+	  if ! echo "$$out" | grep -q "^PASS "; then echo "==> grants 单测没有产出任何 PASS（lume 没跑起来？）"; exit 1; fi
 
 # 单跑一遍并判 FAIL（调试时最快）：make test-one ABAC_MODE=central
 test-one:
