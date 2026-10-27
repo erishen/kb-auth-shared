@@ -1,5 +1,17 @@
 # shared — the reusable ABAC engine for the knowledge product family
 
+> **Part of a three-repo setup**
+>
+> | Repo | Role |
+> |---|---|
+> | [`kb-auth-shared`](https://github.com/erishen/kb-auth-shared) | The ABAC **decision engine** (a library — no process, no network). Imported by everyone else. |
+> | [`kb-auth`](https://github.com/erishen/kb-auth) | The **central identity authority** — account CRUD, password hashing, `htpasswd`. The only writer. |
+> | [`kb-abac`](https://github.com/erishen/kb-abac) | A **consumer site** — runs the engine in-process and shows how it decides. Start here if you just want to see it work. |
+>
+> How they fit together: sites make authorization decisions **locally** (zero network per
+> request) using the shared engine; only *identity* is centralized. A site reads the engine
+> from `kb-auth-shared`, and optionally read-mounts the `kb-auth` volume to pick up accounts.
+
 A set of three `.lume` source files with **no process, no image, and no dependencies**.
 They are `import`ed at runtime by downstream projects — so a single
 change here affects three projects at once (read "what to run before changing this" first).
@@ -15,9 +27,9 @@ Consumers (the thin shim only does `import` + `configure()` to inject the resour
 - The reference consumer is the **kb-auth** service itself (direct `import "../shared/*.lume"`), which runs the cross-project `/api/authorize`.
 - Several sibling **content sites** consume the engine the same way, each providing a thin per-site shim that imports the engine and injects its own resource table via `configure()`.
 
-> For the steps and progress of onboarding centralized auth (mounting the `kb-auth-shared`
-> volume, migrating hashes, yielding branches), see the **kb-auth repo**
-> (`../kb-auth/blob/main/ONBOARDING.md`). This file describes only the **model and contract**.
+> The operational steps for onboarding a site to centralized auth (mounting the volume,
+> migrating hashes, the yield-branch pattern) live with the operator, not in this repo.
+> This file describes only the **model and contract**.
 
 ## Two-layer model: identity is central, stage grants stay local
 

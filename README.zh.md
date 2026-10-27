@@ -1,5 +1,16 @@
 # shared —— knowledge 产品族的复用 ABAC 引擎
 
+> **这是一套三仓库组合**
+>
+> | 仓库 | 职责 |
+> |---|---|
+> | [`kb-auth-shared`](https://github.com/erishen/kb-auth-shared) | ABAC **决策引擎**（纯库：无进程、无网络）。被其余两者 import。 |
+> | [`kb-auth`](https://github.com/erishen/kb-auth) | **中央身份权威** —— 账号 CRUD、密码哈希、`htpasswd`。唯一的写入方。 |
+> | [`kb-abac`](https://github.com/erishen/kb-abac) | **消费方站点** —— 在进程内运行引擎，并展示它如何决策。想先看效果从这里开始。 |
+>
+> 三者关系：站点用共享引擎在**本地**完成授权决策（每次请求零网络），只有*身份*是集中的。
+> 站点从 `kb-auth-shared` 取引擎，可选地以只读方式挂载 `kb-auth` 的卷来获取账号。
+
 三份 `.lume` 源码，没有进程、没有镜像、没有依赖：被各消费方项目
 **在运行时 import**，改一次三个项目同时受影响（改前必读「改这里必须跑什么」）。
 
@@ -14,8 +25,8 @@
 - 参考消费方是 **kb-auth** 服务本身（直接 `import "../shared/*.lume"`），跑跨项目 `/api/authorize`。
 - 多个兄弟 **内容站点** 以同样方式接入：各自提供一个薄 shim，import 引擎并通过 `configure()` 注入本站资源表。
 
-> 接入集中鉴权（挂 `kb-auth-shared` 卷、迁移哈希、让位分支）的操作步骤与进度，
-> 见 **kb-auth 仓库**（`../kb-auth/blob/main/ONBOARDING.md`）。本文件只讲**模型与契约**。
+> 接入集中鉴权（挂卷、迁移哈希、让位分支）的具体操作步骤由运维侧掌握，不在本仓。
+> 本文件只讲**模型与契约**。
 
 ## 两层模型：中央管身份，学段授权留本地
 
