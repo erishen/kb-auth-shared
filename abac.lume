@@ -326,6 +326,109 @@ func env_check(res_meta, ctx) {
   return "";
 }
 
+// 跨属性比较（第 6.5 步）。
+//
+// 上面几步只能做「主体角色 ≥ 资源最低角色」这种单向门槛。真实 ABAC 常需要
+// 比较两个属性，例如「用户 clearance 必须 ≥ 文档密级」：
+//
+//   "report": {
+//     "actions": ["read"], "min_role": "student",
+//     "require": [
+//       { "subject": "clearance", "gte": "resource.level",
+//         "reason": "clearance-below-document-level" }
+//     ]
+//   }
+//
+// 主体侧的属性来自账号记录（role / stages / grade / title，以及任意自定义字段）；
+// 资源侧来自资源表条目本身（任意自定义字段）。字面量用 "literal:X" 表示。
+//
+// 支持操作符：gte / gt / lte / lt / eq / ne。
+// 数值比较按数值，字符串比较按字典序（eq/ne 不限类型）。
+//
+// 返回命中（即不满足）的描述；全部满足返回空串。
+func operand(side, rec, res_meta) {
+  // side 形如 "resource.level" 或 "subject.clearance" 或 "literal:5"
+  let txt = str(side);
+  let dot = -1;
+  let i = 0;
+  while (i < len(txt)) {
+    if (substr(txt, i, 1) == ".") { dot = i; }
+    i = i + 1;
+  }
+  let scope = txt;
+  let attr = "";
+  if (dot >= 0) {
+    scope = substr(txt, 0, dot);
+    attr = substr(txt, dot + 1, len(txt));
+  }
+  if (scope == "subject") { return get(rec, attr, null); }
+  if (scope == "resource") { return get(res_meta, attr, null); }
+  if (scope == "literal") { return substr(txt, 8, len(txt)); }
+  // 没有前缀：规则里写 `subject: "grade"` 时收到的是裸属性名，按主体属性解析，
+  // 取不到再试资源表（方便 require 两侧都写短名）。
+  let as_subject = get(rec, txt, null);
+  if (as_subject != null) { return as_subject; }
+  return get(res_meta, txt, null);
+}
+
+func as_num(v) {
+  // lume 里字符串与数字不能直接比大小，统一按数值解析；无法解析则返回 null
+  let r = try(() => int(v));
+  if (get(r, "err", null) != null) { return null; }
+  return get(r, "ok", null);
+}
+
+func cmp_ok(op, left, right) {
+  if (left == null or right == null) { return false; }
+  if (op == "eq") { return str(left) == str(right); }
+  if (op == "ne") { return str(left) != str(right); }
+  let ln = as_num(left);
+  let rn = as_num(right);
+  if (ln == null or rn == null) {
+    // 非数值：按字符串字典序比（仅在 gte/lte 时有意义）
+    if (op == "gte") { return str(left) >= str(right); }
+    if (op == "lte") { return str(left) <= str(right); }
+    return false;
+  }
+  if (op == "gte") { return ln >= rn; }
+  if (op == "gt")  { return ln > rn; }
+  if (op == "lte") { return ln <= rn; }
+  if (op == "lt")  { return ln < rn; }
+  return false;
+}
+
+// 遍历资源表的 require 段；任一不满足即返回描述。
+func require_check(rec, res_meta) {
+  let rules = get(res_meta, "require", []);
+  if (len(rules) == 0) { return ""; }
+  let i = 0;
+  while (i < len(rules)) {
+    let rule = get(rules, i);
+    let keys = keys(rule);
+    let j = 0;
+    let op = "";
+    let val = null;
+    while (j < len(keys)) {
+      let k = str(get(keys, j));
+      if (k == "subject" or k == "reason") { j = j + 1; }
+      else { op = k; val = get(rule, k); j = j + 1; }
+    }
+    if (op != "") {
+      let lv = operand(get(rule, "subject", ""), rec, res_meta);
+      let rv = operand(val, rec, res_meta);
+      if (not cmp_ok(op, lv, rv)) {
+        let why = str(get(rule, "reason", ""));
+        let desc = "require " + str(get(rule, "subject", "")) + " " + op + " " + str(val)
+                   + " failed (got " + str(lv) + " vs " + str(rv) + ")";
+        if (why != "") { desc = desc + " '" + why + "'"; }
+        return desc;
+      }
+    }
+    i = i + 1;
+  }
+  return "";
+}
+
 // 通用决策引擎：接受外部资源表 + 学段资源名（中央 admin 服务跨项目用）。
 // env_ctx 可选：{hour, weekday}，不传则按当前时间推算（测试请显式传）。
 export func decide_with(user, res, action, stage_id, res_table, stage_res, env_ctx): Decision {
@@ -396,6 +499,15 @@ export func decide_with(user, res, action, stage_id, res_table, stage_res, env_c
       audit_write(d);
       return d;
     }
+  }
+  // 6.5) 跨属性比较（require 段）。排在环境之前：它比较的是主体与资源属性，
+  //      与「现在几点」无关；先判完这些，环境拒绝才有清晰归因。
+  let req_hit = require_check(rec, res_meta);
+  if (req_hit != "") {
+    trace = trace + "[" + req_hit + "] ";
+    let d = { decision: "DENY", reason: trace, subject: str(user), resource: res, action: action };
+    audit_write(d);
+    return d;
   }
   // 7) 环境属性（第 6 步之后：先确认主体/资源都合法，再看环境，
   //    避免把「资源不存在」这类信息通过环境拒绝泄露出去）

@@ -79,6 +79,37 @@ let ENV_TABLE = {
 func denv(u, r, a, h) {
   return abac.decide_with(u, r, a, "", ENV_TABLE, "", { hour: h, weekday: 2 });
 }
+// ---- 第 6.5 步：跨属性比较（require 段）----
+// 资源表可以要求「主体某属性 ≥ 资源某属性」，这是单向角色门槛表达不了的。
+// grade 在夹具里 admin=12 / alice=6(或8) / bob=0，故用 level 做分界。
+let REQ_TABLE = {
+  report: { actions: ["read"], min_role: "student", level: 8,
+            require: [ { subject: "grade", gte: "resource.level", reason: "grade-below-doc-level" } ] },
+  note:   { actions: ["read"], min_role: "student", level: 1,
+            require: [ { subject: "grade", gte: "resource.level", reason: "grade-below-doc-level" } ] },
+};
+func dreq(u, r) {
+  return abac.decide_with(u, r, "read", "", REQ_TABLE, "", { hour: 10, weekday: 2 });
+}
+if (MODE != "corrupt") {
+  // 注意：中央模式下 grade 取本地值（两层合并规则：role←中央，grade/title←本地），
+  // 中央夹具 admin 的 grade=12、本地是 0，所以不能拿 admin 断言「高 grade 放行」。
+  // 用 level 与本地区的大多数账号都满足的阈值（1）来验证放行路径。
+  check("[require] grade 达标者读低密级 → PERMIT",
+        get(dreq("alice", "note"), "decision") == "PERMIT");
+  check("[require] bob(grade 低) 读高密级 → DENY",
+        get(dreq("bob", "report"), "decision") == "DENY");
+  check("[require] 低密级对 grade 达标者放行",
+        get(dreq("alice", "note"), "decision") == "PERMIT");
+  check("[require] 原因写明两侧实际值",
+        contains(get(dreq("bob", "report"), "reason"), "got "));
+  check("[require] 原因带上规则名",
+        contains(get(dreq("bob", "report"), "reason"), "grade-below-doc-level"));
+  check("[require] 跨属性比较先于环境判定",
+        contains(get(dreq("bob", "report"), "reason"), "require") and
+        not contains(get(dreq("bob", "report"), "reason"), "env."));
+}
+
 if (MODE != "corrupt") {
   check("[env] 工作时间内 manage → PERMIT", get(denv("admin", "admin", "manage", 10), "decision") == "PERMIT");
   check("[env] 夜间 manage → DENY", get(denv("admin", "admin", "manage", 22), "decision") == "DENY");
