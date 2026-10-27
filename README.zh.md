@@ -1,4 +1,4 @@
-# shared —— knowledge 产品族的复用 ABAC 引擎
+# kb-auth-shared —— 可复用的 ABAC 授权引擎
 
 > **这是一套三仓库组合**
 >
@@ -23,7 +23,7 @@
 接入方（薄 shim 只做 `import` + `configure()` 注入资源表 + re-export，调用点 0 改动）：
 
 - 参考消费方是 **kb-auth** 服务本身（直接 `import "../shared/*.lume"`），跑跨项目 `/api/authorize`。
-- 多个兄弟 **内容站点** 以同样方式接入：各自提供一个薄 shim，import 引擎并通过 `configure()` 注入本站资源表。
+- 任意数量的 **消费方站点** 都能以同样方式接入：各自提供一个薄 shim，import 引擎并通过 `configure()` 注入本站资源表。
 
 > 接入集中鉴权（挂卷、迁移哈希、让位分支）的具体操作步骤由运维侧掌握，不在本仓。
 > 本文件只讲**模型与契约**。

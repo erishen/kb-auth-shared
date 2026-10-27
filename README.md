@@ -1,4 +1,4 @@
-# shared — the reusable ABAC engine for the knowledge product family
+# kb-auth-shared — a reusable ABAC authorization engine
 
 > **Part of a three-repo setup**
 >
@@ -25,7 +25,7 @@ change here affects three projects at once (read "what to run before changing th
 Consumers (the thin shim only does `import` + `configure()` to inject the resource table + re-export, zero call-site changes):
 
 - The reference consumer is the **kb-auth** service itself (direct `import "../shared/*.lume"`), which runs the cross-project `/api/authorize`.
-- Several sibling **content sites** consume the engine the same way, each providing a thin per-site shim that imports the engine and injects its own resource table via `configure()`.
+- Any number of **consumer sites** can use it the same way: each provides a thin shim that imports the engine and injects its own resource table via `configure()`.
 
 > The operational steps for onboarding a site to centralized auth (mounting the volume,
 > migrating hashes, the yield-branch pattern) live with the operator, not in this repo.
