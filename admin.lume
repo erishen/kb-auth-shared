@@ -86,7 +86,7 @@ export func read_accounts() {
 
 // 写运行时账号（全量覆盖账号表；调用方先 read 再改再写）。
 // ⚠️ 但顶层不能整体重造：这些 accounts.json 是人手维护的种子，JSON 不支持注释，
-//    大家用 "comment" 字段写说明（math/chinese/admin 三份种子都是这个写法）。
+//    大家用 "comment" 字段写说明（各消费方的种子都是这个写法）。
 //    原实现写死 stringify({accounts: acc})，第一次经 API 改账号就会把所有说明抹掉
 //    ——冷跑 /api/admin/grants 时实测到的。这里保留 accounts 之外的顶层键。
 export func save_accounts(acc) {

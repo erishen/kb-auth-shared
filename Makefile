@@ -41,7 +41,7 @@ test: test-local test-central test-corrupt test-grants
 #   central  接了中央卷（role 来自中央、stages 来自本地、写保护生效）
 #   corrupt  中央表读不到（fail-closed，绝不因读不到就放行）
 #
-# 判定方式与 math/tools/test-access.lume 一致：引擎单测靠打印 PASS/FAIL 表达结果
+# 判定方式：引擎单测靠打印 PASS/FAIL 表达结果
 # （lume 脚本本身不会因为 FAIL 行而非零退出），所以必须 grep FAIL，
 # 否则 make test 会在一片 FAIL 里退出 0。
 test-local:
@@ -51,13 +51,13 @@ test-local:
 	if echo "$$out" | grep -q FAIL; then echo "==> local 单测失败"; exit 1; fi
 
 test-central:
-	@out=$$(ABAC_MODE=central STATE_DIR=$(FIX)/local-grant-chinese AUTHORITIES_DIR=$(FIX)/central \
+	@out=$$(ABAC_MODE=central STATE_DIR=$(FIX)/local-grant-b AUTHORITIES_DIR=$(FIX)/central \
 	  ABAC_AUDIT_PATH=$(AUDIT) $(LUME) tools/test-abac.lume 2>&1); \
 	echo "$$out"; \
 	if echo "$$out" | grep -q FAIL; then echo "==> central 单测失败"; exit 1; fi
 
 test-corrupt:
-	@out=$$(ABAC_MODE=corrupt STATE_DIR=$(FIX)/local-grant-chinese AUTHORITIES_DIR=$(FIX)/corrupt-central \
+	@out=$$(ABAC_MODE=corrupt STATE_DIR=$(FIX)/local-grant-b AUTHORITIES_DIR=$(FIX)/corrupt-central \
 	  ABAC_AUDIT_PATH=$(AUDIT) $(LUME) tools/test-abac.lume 2>&1); \
 	echo "$$out"; \
 	if echo "$$out" | grep -q FAIL; then echo "==> corrupt 单测失败"; exit 1; fi
@@ -72,7 +72,7 @@ GRANTS_T := $(shell mktemp /tmp/kb-shared-grants-audit.XXXXXX)
 
 test-grants:
 	@mkdir -p $(GDIR)
-	@cp -f $(FIX)/local-grant-chinese/accounts.json $(GDIR)/accounts.json
+	@cp -f $(FIX)/local-grant-b/accounts.json $(GDIR)/accounts.json
 	@out=$$(ABAC_MODE=grants STATE_DIR=$(GDIR) AUTHORITIES_DIR=$(FIX)/central \
 	  ABAC_AUDIT_PATH=$(GRANTS_T) $(LUME) tools/test-abac.lume 2>&1); \
 	echo "$$out"; \

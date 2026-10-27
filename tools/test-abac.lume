@@ -8,7 +8,7 @@
 // 由 env 决定的（lume 的 let 在加载期求值一次），所以只能在进程级别切换，
 // 不能在一份脚本里边改 env 边断言。
 //
-// 输出 PASS/FAIL 行，Makefile 侧 grep "FAIL" 判失败（与 math/tools/test-access.lume
+// 输出 PASS/FAIL 行，Makefile 侧 grep "FAIL" 判失败
 // 同一套约定，便于以后把三份并回 make check）。
 
 import "../abac.lume" as abac;
@@ -46,7 +46,7 @@ func grant(user) {
   return abac.grant_of(rec);
 }
 
-// 资源表：与 math 的 shim 注入形状一致（stage 走第 6 步白名单），
+// 资源表：与消费方 shim 的注入形状一致（stage 走第 6 步白名单），
 // 另外放一个非学段资源 practice 和一个 admin 资源，用来验证「角色门槛
 // 与学段授权是两条独立的闸」。
 abac.configure({

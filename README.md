@@ -93,13 +93,11 @@ requires starting a new process.
 | `ABAC_AUDIT_PATH` | `STATE_DIR/abac-audit.jsonl` | **tests only** | Redirects audit to a temp dir to avoid polluting fixtures. Not a runtime config. |
 
 The audit file `state/abac-audit.jsonl` is a runtime artifact (`admin.lume`/`abac.lume` both
-write it), not source. Only `math` keeps it out of version control (verified via
-`git check-ignore`: `math/.gitignore:7` matches `state/`); `chinese` and `history` do not
-ignore `state/` — `chinese` has no such directory locally yet because its writable layer is
-in the named volume `/app/state`. So when chinese/history truly onboard local ABAC, they
-must first add `state/` to their `.gitignore`, otherwise audit logs (containing rejected
-account names and resource names) show up as untracked files and can be swept into the repo
-by a careless `git add -A`.
+write it), not source. **Add `state/` to your consumer's `.gitignore`.** Some deployments
+keep the writable layer in a named volume (`/app/state`) so no such directory appears
+locally — but the moment a process runs with `STATE_DIR` pointing at a real directory,
+audit logs show up as untracked files. They contain rejected account names and resource
+names, and are easy to sweep into the repo with a careless `git add -A`.
 
 ## Exported surface (what you can call)
 
@@ -152,7 +150,7 @@ The engine's layering is decided by load-time env and **one script can't switch 
 | Mode | env preconditions | Asserts | What it tests |
 |---|---|---|---|
 | `local` | `STATE_DIR=fixtures/local-full`, **no** `AUTHORITIES_DIR` | 17 | Pre-onboarding behavior must match pre-extraction line by line (regression guard) |
-| `central` | `STATE_DIR=fixtures/local-grant-chinese` + `AUTHORITIES_DIR=fixtures/central` | 26 | role from central, stages from local, central `stages` ignored, `central-only` stage DENY, central-none-local-discarded, CRUD→501 |
+| `central` | `STATE_DIR=fixtures/local-grant-b` + `AUTHORITIES_DIR=fixtures/central` | 26 | role from central, stages from local, central `stages` ignored, `central-only` stage DENY, central-none-local-discarded, CRUD→501 |
 | `corrupt` | `AUTHORITIES_DIR=fixtures/corrupt-central` (intentionally truncated JSON) | 11 | Unreadable table must DENY (not permit), auth-off still permits, `accounts_list(null)` doesn't crash |
 | `grants` | `STATE_DIR=/tmp` copy + `AUTHORITIES_DIR=fixtures/central` | 31 | Local stage-grant write endpoint: `role`/`password` → 400, central-unknown identity → 404, **`stages=[]` requires explicit `confirm_all`** (otherwise "clear grants" = silently opening the whole library), revoke deletes the entry rather than writing empty, never generates htpasswd/map, top-level `comment` field in seeds is preserved |
 

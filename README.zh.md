@@ -85,11 +85,10 @@ decide(user, res, action, stage_id)          # 用 configure() 注入的资源�
 | `ABAC_AUDIT_PATH` | `STATE_DIR/abac-audit.jsonl` | **只有单测** | 把审计引到临时目录，避免污染夹具。别拿它当运行时配置 |
 
 审计文件 `state/abac-audit.jsonl` 是运行时产物（`admin.lume`/`abac.lume` 都会写），
-不是源码。只有 `math` 把它挡在了版本面外（实测 `git check-ignore`：`math/.gitignore:7
-state/` 命中）；`chinese`、`history` 均未忽略 `state/`——`chinese` 本地目前还没有该目录，
-是因为它的可写层在 named volume `/app/state` 里。所以 chinese/history 真要接本地
-ABAC 时，得先把 `state/` 补进各自 `.gitignore`，否则审计日志（含被拒账号名与资源名）
-会以未跟踪文件出现在工作树里，容易被 `git add -A` 顺手带进仓库。
+不是源码。**请把 `state/` 加进消费方的 `.gitignore`。** 有些部署把可写层放在
+named volume（`/app/state`）里，本地看不到该目录；但只要有进程以 `STATE_DIR`
+指向真实目录运行，审计日志就会以未跟踪文件出现在工作树里。它含被拒账号名与
+资源名，容易被 `git add -A` 顺手带进仓库。
 
 ## 导出面（能调什么）
 
@@ -111,7 +110,7 @@ ABAC 时，得先把 `state/` 补进各自 `.gitignore`，否则审计日志（�
 密码或 `htpasswd`（那些归 kb-auth）。三条边界都在实现里：带 `role`/`password` 字段直接
 400（宁可报错也不静默忽略）；`stages=[]` 必须带 `confirm_all=true`，因为空数组在本引擎
 是「全库」；撤销用 `grant_revoke`（删本地条目 → 回到 `central-only`），不是写空数组。
-项目侧路由挂在 `math|chinese` 自己的 `/api/admin/grants*`，**不在 kb-auth**——中央一旦
+项目侧路由挂在各消费方自己的 `/api/admin/grants*`，**不在 kb-auth**——中央一旦
 代管各项目授权，就又变成"一份表驱动多套词表"那个被否掉的形态。`crypt_sha512` 依赖 glibc，macOS 上写路径本来就不可用。
 
 ## 同一句 import 串怎么在三处都成立
@@ -135,7 +134,7 @@ ABAC 时，得先把 `state/` 补进各自 `.gitignore`，否则审计日志（�
 | 模式 | env 前置 | 断言 | 在测什么 |
 |---|---|---|---|
 | `local` | `STATE_DIR=fixtures/local-full`，**不设** `AUTHORITIES_DIR` | 17 | 未接入时的现状必须与抽取前逐条一致（回归保护） |
-| `central` | `STATE_DIR=fixtures/local-grant-chinese` + `AUTHORITIES_DIR=fixtures/central` | 26 | role 来自中央、stages 来自本地、中央 `stages` 被忽略、`central-only` 的学段 DENY、中央无本地有被丢弃、CRUD→501 |
+| `central` | `STATE_DIR=fixtures/local-grant-b` + `AUTHORITIES_DIR=fixtures/central` | 26 | role 来自中央、stages 来自本地、中央 `stages` 被忽略、`central-only` 的学段 DENY、中央无本地有被丢弃、CRUD→501 |
 | `corrupt` | `AUTHORITIES_DIR=fixtures/corrupt-central`（故意截断的 JSON） | 11 | 表读不到必须 DENY（不是放行）、认证关闭仍放行、`accounts_list(null)` 不崩 |
 | `grants` | `STATE_DIR=/tmp` 副本 + `AUTHORITIES_DIR=fixtures/central` | 31 | 本地学段授权写口：带 `role`/`password` 直接 400、中央无此身份 404、**`stages=[]` 必须显式 `confirm_all`**（否则「清空授权」＝静默放开全库）、revoke 是删条目而不是写空数组、绝不生成 htpasswd/map、种子里的 `comment` 顶层字段不被抹掉 |
 
