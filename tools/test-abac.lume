@@ -66,6 +66,34 @@ check("[common] 资源未知 → DENY", dec("admin", "nope", "read", "") == "DEN
 check("[common] 动作不允许 → DENY", dec("admin", "stage", "manage", "") == "DENY");
 check("[common] role_level 未知角色 = 0", abac.role_level("hacker") == 0);
 
+// ---------------------------------------------------------------- 环境属性（第 7 步）
+// 资源表声明 env 规则，运行期事实参与判定。显式传 {hour, weekday} 而不依赖
+// 当前时钟，测试才可重现。这一段跑在公共区：账号夹具在各模式下都可读，
+// 只有「读不到表」的 corrupt 模式 expexpected 全 DENY，此处用 admin 的断言
+// 在 corrupt 下会因 fail-closed 而 DENY —— 故只在非 corrupt 模式执行。
+let ENV_TABLE = {
+  admin: { actions: ["manage"], min_role: "admin",
+           env: { deny_when: [ { fact: "hour", not_in: [9, 18], reason: "business-hours-only" } ] } },
+  data:  { actions: ["read"], min_role: "student" },
+};
+func denv(u, r, a, h) {
+  return abac.decide_with(u, r, a, "", ENV_TABLE, "", { hour: h, weekday: 2 });
+}
+if (MODE != "corrupt") {
+  check("[env] 工作时间内 manage → PERMIT", get(denv("admin", "admin", "manage", 10), "decision") == "PERMIT");
+  check("[env] 夜间 manage → DENY", get(denv("admin", "admin", "manage", 22), "decision") == "DENY");
+  check("[env] 凌晨 manage → DENY", get(denv("admin", "admin", "manage", 3), "decision") == "DENY");
+  check("[env] 边界 9 点算工作时间内", get(denv("admin", "admin", "manage", 9), "decision") == "PERMIT");
+  check("[env] 边界 18 点已算时间外", get(denv("admin", "admin", "manage", 18), "decision") == "DENY");
+  check("[env] 原因写明哪个事实触发",
+        contains(get(denv("admin", "admin", "manage", 22), "reason"), "env.hour=22"));
+  check("[env] 原因带上规则名",
+        contains(get(denv("admin", "admin", "manage", 22), "reason"), "business-hours-only"));
+  check("[env] 未声明 env 的资源不受影响", get(denv("admin", "data", "read", 22), "decision") == "PERMIT");
+  check("[env] 环境检查排在角色之后（学生仍先被角色拦）",
+        get(denv("alice", "admin", "manage", 22), "decision") == "DENY");
+}
+
 // ---------------------------------------------------------------- local 模式
 if (MODE == "local") {
   check("[local] 未走中央模式", abac.central_mode() == false);

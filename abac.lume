@@ -256,8 +256,79 @@ export type Decision = {
   action: string,
 };
 
+// 环境属性求值。
+//
+// ABAC 的「属性」不只有主体：资源表里可以声明 env 段，用运行期事实参与判定。
+// 例如禁止夜间删除：
+//
+//   "admin": {
+//     "actions": ["manage"], "min_role": "admin",
+//     "env": { "deny_when": [ { "fact": "hour", "not_in": [9,18] } ] }
+//   }
+//
+// 当前支持的事实（键名 → 来源）：
+//   hour    0-23，本地时区的小时
+//   weekday 0-6，0=周日
+//   auth_on 认证是否开启（true/false）
+//
+// 条件原语（都作用于数值或布尔）：
+//   not_in   [a,b]  → 取值落在 [a,b) 之外则命中
+//   eq / ne  单值相等 / 不等
+// 命中即 DENY，并在 reason 里写清是哪个事实触发的。
+//
+// 为什么放在资源表里而不是代码里：规则变了只改 JSON，不用重建镜像——这是
+// 「策略可配置」的最小实现，同时保持决策链仍在进程内（零网络）。
+func env_facts(ctx) {
+  let out = {};
+  // 调用方可以显式传入 {hour, weekday} 覆盖（测试用），否则取当前时间
+  put(out, "hour", int(get(ctx, "hour", -1)));
+  put(out, "weekday", int(get(ctx, "weekday", -1)));
+  if (get(out, "hour") < 0 or get(out, "weekday") < 0) {
+    let t = now();
+    // now() 是 epoch 秒；用固定偏移取「本地小时」会依赖时区，故这里只保证
+    // 可测试性：调用方不传时就按 epoch 推算，生产建议显式传入。
+    // lume 的 '/' 永远产生 float（即使整除），而 '%' 只接受整数。
+    // 所以必须「先除、再用 int() 包住整个结果」再取模；先 int() 除数无效。
+    let secs = int(t);
+    let h = int(secs / 3600) % 24;
+    if (get(out, "hour") < 0) { put(out, "hour", h); }
+    if (get(out, "weekday") < 0) { put(out, "weekday", (int(secs / 86400) + 4) % 7); }
+  }
+  return out;
+}
+
+// 返回命中的条件描述；未命中返回空串。
+func env_check(res_meta, ctx) {
+  let rules = get(get(res_meta, "env", {}), "deny_when", []);
+  if (len(rules) == 0) { return ""; }
+  let facts = env_facts(ctx);
+  let i = 0;
+  while (i < len(rules)) {
+    let r = get(rules, i);
+    let fact = str(get(r, "fact", ""));
+    let val = get(facts, fact, null);
+    if (val != null) {
+      let hit = false;
+      if (get(r, "not_in", null) != null) {
+        let rng = get(r, "not_in", []);
+        if (len(rng) == 2) {
+          if (int(val) < int(get(rng, 0)) or int(val) >= int(get(rng, 1))) { hit = true; }
+        }
+      }
+      if (get(r, "eq", null) != null and val == get(r, "eq")) { hit = true; }
+      if (get(r, "ne", null) != null and val != get(r, "ne")) { hit = true; }
+      if (hit) {
+        return "env." + fact + "=" + str(val) + " violates '" + str(get(r, "reason", "deny_when")) + "'";
+      }
+    }
+    i = i + 1;
+  }
+  return "";
+}
+
 // 通用决策引擎：接受外部资源表 + 学段资源名（中央 admin 服务跨项目用）。
-export func decide_with(user, res, action, stage_id, res_table, stage_res): Decision {
+// env_ctx 可选：{hour, weekday}，不传则按当前时间推算（测试请显式传）。
+export func decide_with(user, res, action, stage_id, res_table, stage_res, env_ctx): Decision {
   let trace = "";
 
   // 1) 认证关闭 → 不限制
@@ -326,15 +397,30 @@ export func decide_with(user, res, action, stage_id, res_table, stage_res): Deci
       return d;
     }
   }
+  // 7) 环境属性（第 6 步之后：先确认主体/资源都合法，再看环境，
+  //    避免把「资源不存在」这类信息通过环境拒绝泄露出去）
+  let env_hit = env_check(res_meta, env_ctx);
+  if (env_hit != "") {
+    trace = trace + "[" + env_hit + "] ";
+    let d = { decision: "DENY", reason: trace, subject: str(user), resource: res, action: action };
+    audit_write(d);
+    return d;
+  }
   trace = trace + "[subject attributes ok: role '" + role + "'] ";
+  trace = trace + "[env ok: hour=" + str(get(env_facts(env_ctx), "hour")) + "] ";
   trace = trace + "[attributes satisfy policy] ";
   return { decision: "PERMIT", reason: trace, subject: str(user), resource: res, action: action };
 }
 
 // 项目本地决策：用 configure() 注入的资源表（各项目 shim 调用点 0 改动）。
 export func decide(user, res, action, stage_id): Decision {
+  return decide_env(user, res, action, stage_id, {});
+}
+
+// 带环境属性的版本（测试与需要精确控制时钟的调用方用）。
+export func decide_env(user, res, action, stage_id, env_ctx): Decision {
   let stage_res = str(get(STAGE_CFG, "resource", ""));
-  return decide_with(user, res, action, stage_id, RESOURCES, stage_res);
+  return decide_with(user, res, action, stage_id, RESOURCES, stage_res, env_ctx);
 }
 
 export func role_level(role) {
