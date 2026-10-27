@@ -1,9 +1,9 @@
 {
-  "comment": "中央身份卷（kb-auth 的 kb-auth-shared）夹具：模拟 admin/data/accounts.json 经 shared/admin.lume 落盘后的样子——含 role + password_hash。⚠️ admin/alice/bob 的 stages 故意用 math 词表（primary-math），用来验证「中央的 stages 一律被忽略、只出身份与角色」：各项目学段词表不同（chinese 用 primary/junior/senior/univ），一份中央表不可能同时当多个项目的学段权威。carol = 中央有身份、所有项目本地都没授权 → 应「角色门槛生效、学段全 DENY」。",
+  "comment": "中央身份卷（kb-auth 的 kb-auth-shared）夹具：模拟 accounts.json 经 shared/admin.lume 落盘后的样子——含 role + password_hash。⚠️ admin/alice/bob 的 stages 故意用词表 A（stage-a），用来验证「中央的 stages 一律被忽略、只出身份与角色」：各消费方的学段词表互不相同（例如词表 B 用 stage-b/stage-c），一份中央表不可能同时当多个项目的学段权威。carol = 中央有身份、所有项目本地都没授权 → 应「角色门槛生效、学段全 DENY」。",
   "accounts": {
-    "admin": { "role": "admin", "stages": ["primary-math"], "grade": 12, "title": "管理员（全库）", "password_hash": "$6$fixture-not-a-real-hash" },
-    "alice": { "role": "student", "stages": ["primary-math"], "grade": 6, "title": "小学生", "password_hash": "$6$fixture-not-a-real-hash" },
-    "bob": { "role": "teacher", "stages": ["middle-school"], "grade": 0, "title": "家教", "password_hash": "$6$fixture-not-a-real-hash" },
+    "admin": { "role": "admin", "stages": ["stage-a"], "grade": 12, "title": "管理员（全库）", "password_hash": "$6$fixture-not-a-real-hash" },
+    "alice": { "role": "student", "stages": ["stage-a"], "grade": 6, "title": "词表 A 用户", "password_hash": "$6$fixture-not-a-real-hash" },
+    "bob": { "role": "teacher", "stages": ["stage-b"], "grade": 0, "title": "词表 A 教师", "password_hash": "$6$fixture-not-a-real-hash" },
     "carol": { "role": "student", "stages": [], "grade": 9, "title": "只有中央身份、本地从未授权", "password_hash": "$6$fixture-not-a-real-hash" }
   }
 }

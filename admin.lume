@@ -375,7 +375,7 @@ export func grant_update(user, target, payload) {
     // 列表取字符串键会 err，map 取 "role" 不会。这里用来挡住 stages 传成对象。
     let chk = try(() => get(st, "role", null));
     if (get(chk, "err", null) == null) {
-      return { status: 400, body: { err: "stages 必须是学段 id 数组，如 [\"junior\"]" } };
+      return { status: 400, body: { err: "stages 必须是学段 id 数组，如 [\"stage-a\"]" } };
     }
     // ⚠️ 本引擎里 stages=[] 的语义是「全库可见」，不是「什么都不给」。
     //    所以空数组必须显式确认，否则「清空授权」这个再自然不过的前端操作就会

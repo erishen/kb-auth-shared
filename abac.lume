@@ -20,8 +20,8 @@
 //
 // ============ 路径约定（v2：中央身份 + 本地授权） ============
 //
-// 各消费方的学段词表互不相同（例如词汇表 A=primary-math/…，词汇表 B=primary/junior/
-// senior/univ），单一 accounts.json 无法同时驱动多个项目，故把「身份」与「授权」
+// 各消费方的学段词表互不相同（例如词表 A=stage-a/…，词表 B=stage-b/
+// stage-c/…），单一 accounts.json 无法同时驱动多个项目，故把「身份」与「授权」
 // 拆成两层，仍由本项目进程本地跑 decide()（零网络）：
 //
 //   STATE_DIR        本地可写：授权层 accounts.json + 审计 + 本地 htpasswd.map.json

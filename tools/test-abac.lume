@@ -61,7 +61,7 @@ abac.configure({
 print("== ABAC_MODE=" + MODE + " central_mode=" + str(abac.central_mode()));
 // ---------------------------------------------------------------- 公共断言
 // 认证关闭 → 一律放行：本机 make dev 的前提，三种模式下都不该变。
-check("[common] 认证关闭 → PERMIT", dec(null, "stage", "read", "junior") == "PERMIT");
+check("[common] 认证关闭 → PERMIT", dec(null, "stage", "read", "stage-b") == "PERMIT");
 check("[common] 资源未知 → DENY", dec("admin", "nope", "read", "") == "DENY");
 check("[common] 动作不允许 → DENY", dec("admin", "stage", "manage", "") == "DENY");
 check("[common] role_level 未知角色 = 0", abac.role_level("hacker") == 0);
@@ -69,10 +69,10 @@ check("[common] role_level 未知角色 = 0", abac.role_level("hacker") == 0);
 // ---------------------------------------------------------------- local 模式
 if (MODE == "local") {
   check("[local] 未走中央模式", abac.central_mode() == false);
-  check("[local] alice 看小学 → PERMIT", dec("alice", "stage", "read", "primary-math") == "PERMIT");
-  check("[local] alice 看中考 → DENY（白名单外）", dec("alice", "stage", "read", "middle-school") == "DENY");
+  check("[local] alice 看词表 A 的 stage-a → PERMIT", dec("alice", "stage", "read", "stage-a") == "PERMIT");
+  check("[local] alice 看词表 A 外的 stage-b → DENY（白名单外）", dec("alice", "stage", "read", "stage-b") == "DENY");
   check("[local] admin stages=[] → 全库", dec("admin", "stage", "read", "whatever") == "PERMIT");
-  check("[local] 未登记账号 → DENY", dec("nobody", "stage", "read", "primary-math") == "DENY");
+  check("[local] 未登记账号 → DENY", dec("nobody", "stage", "read", "stage-a") == "DENY");
   check("[local] teacher 够不到 admin 资源", dec("bob", "admin", "manage", "") == "DENY");
   check("[local] 授权标记缺省 = local", grant("alice") == "local");
   check("[local] 全库标记 = all", grant("admin") == "all");
@@ -85,34 +85,34 @@ if (MODE == "local") {
   check("[local] admin 的 grant = all", get(admin_row, "grant", "") == "all");
   check("[local] 列表第 2 行 grant = local", get(get(rows, 1, {}), "grant", "") == "local");
   // 现状行为：本地模式下读不到表才 fail-closed；这里表读得到，不该出现该原因
-  check("[local] 未触发读不到降级", not contains(why("alice", "stage", "read", "primary-math"), "unavailable"));
+  check("[local] 未触发读不到降级", not contains(why("alice", "stage", "read", "stage-a"), "unavailable"));
 }
 
 // ---------------------------------------------------------------- central 模式
 if (MODE == "central") {
   check("[central] 进入中央模式", abac.central_mode() == true);
-  // 词表来自本地：中央给 alice 的是 primary-math，本地给的是 junior
-  check("[central] alice 看本地授权的 junior → PERMIT", dec("alice", "stage", "read", "junior") == "PERMIT");
-  check("[central] 中央那份 primary-math 被忽略 → DENY", dec("alice", "stage", "read", "primary-math") == "DENY");
-  check("[central] alice 看未授权 senior → DENY", dec("alice", "stage", "read", "senior") == "DENY");
+  // 词表来自本地：中央给 alice 的是 stage-a，本地给的是 stage-b
+  check("[central] alice 看本地授权的 stage-b → PERMIT", dec("alice", "stage", "read", "stage-b") == "PERMIT");
+  check("[central] 中央那份 stage-a 被忽略 → DENY", dec("alice", "stage", "read", "stage-a") == "DENY");
+  check("[central] alice 看未授权 stage-c → DENY", dec("alice", "stage", "read", "stage-c") == "DENY");
   // 角色来自中央：bob 在中央是 teacher，本地表里那条 role 不参与判定
   check("[central] bob 角色仍来自中央（teacher）", role_of("bob") == "teacher");
   check("[central] bob 够不到 admin 资源", dec("bob", "admin", "manage", "") == "DENY");
-  check("[central] bob 本地授权 middle-school → PERMIT", dec("bob", "stage", "read", "middle-school") == "PERMIT");
+  check("[central] bob 本地授权 stage-b → PERMIT", dec("bob", "stage", "read", "stage-b") == "PERMIT");
   // 本地 admin stages=[] → 全库：管理员不该被本地授权表锁死
   check("[central] admin 本地 stages=[] → 全库", dec("admin", "stage", "read", "any-stage-at-all") == "PERMIT");
   check("[central] admin 标记 = all", grant("admin") == "all");
   check("[central] alice 标记 = local", grant("alice") == "local");
   // 中央有身份、本地没授权 → 学段全关，但角色门槛照常
   check("[central] carol 存在且角色来自中央", role_of("carol") == "student");
-  check("[central] carol 学段 → DENY", dec("carol", "stage", "read", "junior") == "DENY");
-  check("[central] carol 的原因是「本地未授权」", contains(why("carol", "stage", "read", "junior"), "no local stage grant"));
+  check("[central] carol 学段 → DENY", dec("carol", "stage", "read", "stage-b") == "DENY");
+  check("[central] carol 的原因是「本地未授权」", contains(why("carol", "stage", "read", "stage-b"), "no local stage grant"));
   check("[central] carol 非学段资源按角色放行", dec("carol", "practice", "read", "") == "PERMIT");
   check("[central] carol 标记 = central-only", grant("carol") == "central-only");
   check("[central] carol 可见学段 = []", len(abac.visible_stages("carol")) == 0);
   // 只在本地、中央没这个身份 → 合并后丢弃（否则中央加人前本地残留会意外参与决策）
   check("[central] 中央无 dave → 合并表里没有", grant("dave") == "<absent>");
-  check("[central] dave 决策 fail-closed", dec("dave", "stage", "read", "senior") == "DENY");
+  check("[central] dave 决策 fail-closed", dec("dave", "stage", "read", "stage-c") == "DENY");
   // 管理端写保护：接了中央卷的项目再写账号 = 静默不生效，必须显式拒绝
   let c = adm.account_create("admin", { user: "newbie", role: "student", password: "x" });
   check("[central] account_create → 501", get(c, "status", 0) == 501);
@@ -127,10 +127,10 @@ if (MODE == "central") {
 // 中央表读到半个 JSON：以前是「警告 + 不限制」= 全站放行，现在必须 fail-closed。
 if (MODE == "corrupt") {
   check("[corrupt] 表读不到 → accounts_map null", abac.accounts_map() == null);
-  check("[corrupt] 认证开启时一律 DENY", dec("alice", "stage", "read", "junior") == "DENY");
+  check("[corrupt] 认证开启时一律 DENY", dec("alice", "stage", "read", "stage-b") == "DENY");
   check("[corrupt] 连非学段资源也 DENY", dec("admin", "practice", "read", "") == "DENY");
   check("[corrupt] 原因是 attributes unavailable", contains(why("alice", "practice", "read", ""), "unavailable"));
-  check("[corrupt] 认证关闭仍放行（make dev 不受影响）", dec(null, "stage", "read", "junior") == "PERMIT");
+  check("[corrupt] 认证关闭仍放行（make dev 不受影响）", dec(null, "stage", "read", "stage-b") == "PERMIT");
   check("[corrupt] visible_stages 不再当成不限制", abac.visible_stages("alice") != null);
   // 表读不到时管理端列表不能崩（keys(null) 在 lume 里是运行期错误，会打挂 handler）
   check("[corrupt] accounts_list(null) 返回空而非崩", len(adm.accounts_list(adm.accounts_view())) == 0);
@@ -141,14 +141,14 @@ if (MODE == "corrupt") {
 // 的一份 accounts.json 副本——这个模式会真的写盘，不能拿夹具当草稿纸。
 if (MODE == "grants") {
   check("[grants] 中央模式", abac.central_mode() == true);
-  check("[grants] 起点：alice 本地授权 junior", dec("alice", "stage", "read", "junior") == "PERMIT");
-  check("[grants] 起点：alice 看 senior 仍 DENY", dec("alice", "stage", "read", "senior") == "DENY");
+  check("[grants] 起点：alice 本地授权 stage-b", dec("alice", "stage", "read", "stage-b") == "PERMIT");
+  check("[grants] 起点：alice 看 stage-c 仍 DENY", dec("alice", "stage", "read", "stage-c") == "DENY");
 
-  let w = adm.grant_update("admin", "alice", { stages: ["senior"] });
+  let w = adm.grant_update("admin", "alice", { stages: ["stage-c"] });
   check("[grants] 写授权返回 ok", get(w, "ok", false) == true);
   check("[grants] 写后 grant=local", get(w, "grant", "") == "local");
-  check("[grants] 写后 alice 能看 senior", dec("alice", "stage", "read", "senior") == "PERMIT");
-  check("[grants] 整表替换：junior 反而不可见", dec("alice", "stage", "read", "junior") == "DENY");
+  check("[grants] 写后 alice 能看 stage-c", dec("alice", "stage", "read", "stage-c") == "PERMIT");
+  check("[grants] 整表替换：stage-b 反而不可见", dec("alice", "stage", "read", "stage-b") == "DENY");
   check("[grants] 角色没被本地写口动过（仍来自中央 student）", role_of("alice") == "student");
 
   // 越界字段必须显式拒绝，不能静默忽略（静默忽略会让前端以为改成功了）
@@ -160,7 +160,7 @@ if (MODE == "grants") {
         get(adm.grant_update("admin", "alice", { stages: {"a": 1} }), "status", 0) == 400);
   // 中央没这个身份 → 不该给它建本地条目
   check("[grants] 中央无 dave → 404",
-        get(adm.grant_update("admin", "dave", { stages: ["senior"] }), "status", 0) == 404);
+        get(adm.grant_update("admin", "dave", { stages: ["stage-c"] }), "status", 0) == 404);
   // 最重要的一条：stages=[] 在本引擎是「全库」，空数组必须显式确认
   check("[grants] stages=[] 未确认 → 400（挡住「清空=提权」）",
         get(adm.grant_update("admin", "bob", { stages: [] }), "status", 0) == 400);
@@ -172,7 +172,7 @@ if (MODE == "grants") {
   // 撤销必须是「删本地条目 → central-only」，而不是写空数组
   check("[grants] revoke 返回 central-only",
         get(adm.grant_revoke("admin", "alice"), "grant", "") == "central-only");
-  check("[grants] revoke 后 alice 任何学段都 DENY", dec("alice", "stage", "read", "senior") == "DENY");
+  check("[grants] revoke 后 alice 任何学段都 DENY", dec("alice", "stage", "read", "stage-c") == "DENY");
   check("[grants] revoke 后本地条目已消失", get(adm.read_accounts(), "alice", null) == null);
   check("[grants] 重复 revoke → 404",
         get(adm.grant_revoke("admin", "alice"), "status", 0) == 404);

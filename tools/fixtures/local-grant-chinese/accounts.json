@@ -1,9 +1,9 @@
 {
-  "comment": "模式 central 用的「本地授权表」夹具：故意用 chinese 词表（junior/senior），与 central/ 的 math 词表冲突——这正是抽离要解决的：同一份中央身份要驱动多个词表不同的项目。alice 中央给 primary-math、本地给 junior → 生效的必须是 junior；bob 本地只授权 middle-school；admin 本地 stages=[] → 全库（管理员不该被本地表锁死）；dave 只有本地有、中央没这个身份 → 合并后应丢弃（中央 htpasswd 里没它，本来登不进来，留着只会让本地残留条目意外参与决策）；carol 中央有、这里没有 → _grant=central-only，学段全 DENY。",
+  "comment": "模式 central 用的「本地授权表」夹具：故意用另一套词表（stage-b/stage-c），与 central/ 的词表 A（stage-a）冲突——这正是抽离要解决的：同一份中央身份要驱动多个词表不同的项目。alice 中央给 stage-a、本地给 stage-b → 生效的必须是 stage-b；bob 本地只授权 stage-b；admin 本地 stages=[] → 全库（管理员不该被本地表锁死）；dave 只有本地有、中央没这个身份 → 合并后应丢弃（中央 htpasswd 里没它，本来登不进来，留着只会让本地残留条目意外参与决策）；carol 中央有、这里没有 → _grant=central-only，学段全 DENY。",
   "accounts": {
     "admin": { "role": "admin", "stages": [], "grade": 0, "title": "管理员（全库）" },
-    "alice": { "role": "student", "stages": ["junior"], "grade": 8, "title": "本地授权：初中" },
-    "bob": { "role": "teacher", "stages": ["middle-school"], "grade": 0, "title": "本地授权：中考" },
-    "dave": { "role": "student", "stages": ["senior"], "grade": 11, "title": "只在本地、中央无身份" }
+    "alice": { "role": "student", "stages": ["stage-b"], "grade": 8, "title": "本地授权：stage-b" },
+    "bob": { "role": "teacher", "stages": ["stage-b"], "grade": 0, "title": "本地授权：stage-b" },
+    "dave": { "role": "student", "stages": ["stage-c"], "grade": 11, "title": "只在本地、中央无身份" }
   }
 }
