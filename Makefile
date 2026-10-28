@@ -9,10 +9,10 @@
 # 依赖：lume 工具链（bin/lume）—— 见下方 LUME_DIR 解析逻辑（默认相对路径；不存在时回退 PATH 上的 lume）
 #
 # 常用：
-#   make test        跑引擎单测（local / central / corrupt / grants 四遍）
+#   make test        跑引擎单测（local / central / corrupt / grants / forge / auditfail 六遍）
 #   make check       语法检查三份引擎 + 单测
 #
-# 为什么要跑四遍：分层是在模块加载期由 env 求值一次的（lume 的 let 语义），
+# 为什么要跑六遍：分层是在模块加载期由 env 求值一次的（lume 的 let 语义），
 # 切换 AUTHORITIES_DIR 只能靠起新进程，不能在同一份脚本里边改 env 边断言。
 # grants 那一遍是**写口**测试（会真落盘），所以它的 STATE_DIR 必须是 /tmp 下的副本
 # ——拿夹具当草稿纸的话，这一遍会把夹具改掉，后面 local/central 两遍就失真了。
@@ -93,18 +93,20 @@ bootstrap:
 AUDIT := /tmp/kb-shared-abac-audit.jsonl
 FIX   := tools/fixtures
 
-.PHONY: bootstrap test test-one test-local test-central test-corrupt test-grants check require-lume
+.PHONY: bootstrap test test-one test-local test-central test-corrupt test-grants test-forge test-auditfail check require-lume
 
 require-lume:
 	$(call require_lume)
 
-test: require-lume test-local test-central test-corrupt test-grants
+test: require-lume test-local test-central test-corrupt test-grants test-forge test-auditfail
 	@echo "==> 共享 ABAC 引擎单测全部通过"
 
-# 四套环境：
+# 六套环境：
 #   local    未接中央卷（现状行为，必须与抽取前逐条一致）
 #   central  接了中央卷（role 来自中央、stages 来自本地、写保护生效）
 #   corrupt  中央表读不到（fail-closed，绝不因读不到就放行）
+#   forge    环境属性伪造：主体记录里塞 hour 字段妄图绕过夜间限制 → 必须被无视
+#   auditfail 审计落盘指向不可写路径：验证审计失败不阻塞决策、且不保证落盘
 #
 # 判定方式：引擎单测靠打印 PASS/FAIL 表达结果
 # （lume 脚本本身不会因为 FAIL 行而非零退出），所以必须 grep FAIL，
@@ -146,6 +148,24 @@ test-grants:
 	echo "$$out"; \
 	if echo "$$out" | grep -q FAIL; then echo "==> grants 单测失败"; exit 1; fi; \
 	  if ! echo "$$out" | grep -q "^PASS "; then echo "==> grants 单测没有产出任何 PASS（lume 没跑起来？）"; exit 1; fi
+
+# forge 模式：主体记录伪造 hour 字段，必须被引擎无视（env 事实只来自服务端 ctx）。
+test-forge:
+	@out=$$(ABAC_MODE=forge STATE_DIR=$(FIX)/local-forge \
+	  ABAC_AUDIT_PATH=$(AUDIT) $(LUME) tools/test-abac.lume 2>&1); \
+	echo "$$out"; \
+	if echo "$$out" | grep -q FAIL; then echo "==> forge 单测失败"; exit 1; fi; \
+	  if ! echo "$$out" | grep -q "^PASS "; then echo "==> forge 单测没有产出任何 PASS（lume 没跑起来？）"; exit 1; fi
+
+# auditfail 模式：审计落盘路径故意指向不可写位置（/dev/null 下，任何用户都写不进），
+# 模拟「审计写入失败 / 锁争用」。验证决策结论不依赖审计是否成功，且审计文件不会生成。
+AUDIT_FAIL := /dev/null/kb-abac-audit-noop/abac-audit.jsonl
+test-auditfail:
+	@out=$$(ABAC_MODE=auditfail STATE_DIR=$(FIX)/local-full \
+	  ABAC_AUDIT_PATH=$(AUDIT_FAIL) $(LUME) tools/test-abac.lume 2>&1); \
+	echo "$$out"; \
+	if echo "$$out" | grep -q FAIL; then echo "==> auditfail 单测失败"; exit 1; fi; \
+	  if ! echo "$$out" | grep -q "^PASS "; then echo "==> auditfail 单测没有产出任何 PASS（lume 没跑起来？）"; exit 1; fi
 
 # 单跑一遍并判 FAIL（调试时最快）：make test-one ABAC_MODE=central
 test-one:

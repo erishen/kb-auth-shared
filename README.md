@@ -73,12 +73,21 @@ decide(user, res, action, stage_id)          # resource table injected via confi
 4. account table unreadable / account unregistered  → DENY (fail-closed)
 5. role level below resource's min_role             → DENY
 6. res == stageResource and stage not granted (incl. central-only) → DENY
+7. require: subject attribute vs resource attribute (missing attribute → operand null
+   → comparison false → DENY)                        → DENY
+8. env: environment rules (deny_when) satisfied     → DENY
 ```
 
 Step 4 was changed this round from "unreadable → warn → PERMIT" to fail-closed: when the
 account file is corrupt, accidentally deleted, or the volume is mounted but empty, the old
 logic effectively opened the whole site. `user == null` still short-circuits at step 1, so
 the `make dev` experience is unchanged.
+
+Step 7's missing-attribute case is worth calling out: `operand()` returns `null` for an
+unresolved subject/resource attribute, and `cmp_ok()` short-circuits to `false` whenever
+either side is `null` — so a missing attribute is **never** coerced to `0` and compared
+(`0>=0` would be a bug, and it does not happen here). It simply fails the `require`, which
+means DENY. That keeps step 7 fail-closed without a special-case existence check.
 
 ## Environment-variable matrix
 

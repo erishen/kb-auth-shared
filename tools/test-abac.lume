@@ -145,6 +145,36 @@ if (MODE == "local") {
   check("[local] 列表第 2 行 grant = local", get(get(rows, 1, {}), "grant", "") == "local");
   // 现状行为：本地模式下读不到表才 fail-closed；这里表读得到，不该出现该原因
   check("[local] 未触发读不到降级", not contains(why("alice", "stage", "read", "stage-a"), "unavailable"));
+
+  // ---------------------------------------------------------------- 缺失属性（require 段）
+  // 文章承诺：缺失属性会让比较失败并拒绝，绝不会「按 0 兜底」意外放行。
+  // 主体缺属性：alice 没有 clearance 字段；资源缺属性：doc2 没声明 level。
+  let MISS_TABLE = {
+    doc:  { actions: ["read"], min_role: "student", level: 5,
+            require: [ { subject: "clearance", gte: "resource.level", reason: "needs-clearance" } ] },
+    doc2: { actions: ["read"], min_role: "student",
+            require: [ { subject: "grade", gte: "resource.level", reason: "needs-level" } ] },
+  };
+  func dmiss(u, r) { return abac.decide_with(u, r, "read", "", MISS_TABLE, "", { hour: 10, weekday: 2 }); }
+  check("[missing-attr] 主体缺 clearance → DENY（不按 0 兜底放行）",
+        get(dmiss("alice", "doc"), "decision") == "DENY");
+  check("[missing-attr] 原因写明 require 与规则名",
+        contains(get(dmiss("alice", "doc"), "reason"), "require") and
+        contains(get(dmiss("alice", "doc"), "reason"), "needs-clearance"));
+  check("[missing-attr] 资源缺 level → DENY",
+        get(dmiss("alice", "doc2"), "decision") == "DENY");
+  check("[missing-attr] 资源缺属性原因含 require",
+        contains(get(dmiss("alice", "doc2"), "reason"), "require"));
+
+  // ---------------------------------------------------------------- 空资源表
+  // 文章承诺：资源表为空时一切请求都 unknown → DENY，无漏网；但认证关闭（make dev）
+  // 仍走第 1 步 PERMIT，不受空表影响。
+  check("[empty-table] 空资源表下 admin 仍 DENY",
+        abac.decide_with("admin", "x", "read", "", {}, "", {}).decision == "DENY");
+  check("[empty-table] 空资源表下 student 也 DENY",
+        abac.decide_with("alice", "y", "read", "", {}, "", {}).decision == "DENY");
+  check("[empty-table] 空资源表下认证关闭仍 PERMIT（make dev 不受影响）",
+        abac.decide_with(null, "z", "read", "", {}, "", {}).decision == "PERMIT");
 }
 
 // ---------------------------------------------------------------- central 模式
@@ -193,6 +223,51 @@ if (MODE == "corrupt") {
   check("[corrupt] visible_stages 不再当成不限制", abac.visible_stages("alice") != null);
   // 表读不到时管理端列表不能崩（keys(null) 在 lume 里是运行期错误，会打挂 handler）
   check("[corrupt] accounts_list(null) 返回空而非崩", len(adm.accounts_list(adm.accounts_view())) == 0);
+  // —— 身份卷异常（中央身份卷读不到，corrupt-central 是半截 JSON）—— fail-closed，
+  //     绝不因读不到就放行：连管理员对学段/非学段资源都 DENY，原因标 unavailable。
+  check("[identity-volume] 中央卷读不到 → 管理员也全量 DENY", dec("admin", "stage", "read", "x") == "DENY");
+  check("[identity-volume] 原因是 attributes unavailable", contains(why("admin", "stage", "read", "x"), "unavailable"));
+}
+
+// ---------------------------------------------------------------- forge 模式
+// 环境属性伪造：攻击者企图在账号记录里塞一个 hour 字段冒充工作时间，绕过夜间
+// 限制。引擎的安全前提是 env 事实只来自服务端 ctx（服务器时钟），绝不在判定里
+// 读取主体记录里的环境字段——所以这个伪造必须被无视。
+// 专用夹具 local-forge 在 local-full 基础上加了一个 mallory（role=admin，记录里
+// 故意带 hour=10）。
+if (MODE == "forge") {
+  check("[forge] 进入本地（非中央）模式", abac.central_mode() == false);
+  let FENV = {
+    admin: { actions: ["manage"], min_role: "admin",
+             env: { deny_when: [ { fact: "hour", not_in: [9, 18], reason: "biz-hours" } ] } },
+  };
+  func dforge(u, a, h) {
+    return abac.decide_with(u, "admin", a, "", FENV, "", { hour: h, weekday: 2 });
+  }
+  // 基准：合法 admin 在工作时间 → PERMIT，夜间 → DENY
+  check("[forge] 工作时间 10 点 → PERMIT", get(dforge("admin", "manage", 10), "decision") == "PERMIT");
+  check("[forge] 夜间 22 点 → DENY", get(dforge("admin", "manage", 22), "decision") == "DENY");
+  // 伪造：mallory 记录里塞了 hour=10，妄图冒充工作时间绕过夜间限制
+  check("[forge] 主体伪造 hour=10 不能绕过夜间 DENY", get(dforge("mallory", "manage", 22), "decision") == "DENY");
+  check("[forge] 伪造字段被忽略（原因仍来自服务端 ctx hour=22）",
+        contains(get(dforge("mallory", "manage", 22), "reason"), "env.hour=22"));
+  // 换个方向：白天伪造字段同样无影响（仍按服务端 ctx 判定）
+  check("[forge] 伪造字段对白天判定也无影响（仍 PERMIT）", get(dforge("mallory", "manage", 10), "decision") == "PERMIT");
+}
+
+// ---------------------------------------------------------------- auditfail 模式
+// 审计写入失败：AUDIT_PATH 被指向不可写路径（/dev/null 下，任何用户都写不进），
+// 模拟「审计落盘失败 / 锁争用」。文章第九节承诺：审计失败不得阻塞决策返回，DENY
+// 照常，且不保证每条 DENY 都成功落盘。本模式验证两件事：① 决策结论不依赖审计是否
+// 成功；② 审计文件确实没生成（失败被 try 静默处理）。
+if (MODE == "auditfail") {
+  check("[auditfail] 未知资源 DENY 正确返回（即便审计写失败）", dec("admin", "nope", "read", "") == "DENY");
+  let d = abac.decide_with("admin", "nope", "read", "", {}, "", {});
+  check("[auditfail] DENY 结论与原因完整", get(d, "decision") == "DENY" and contains(get(d, "reason"), "unknown"));
+  check("[auditfail] 认证关闭 PERMIT 不受影响", dec(null, "stage", "read", "stage-a") == "PERMIT");
+  // 审计文件不应生成：路径不可写 → write_file 被 try 吞掉
+  check("[auditfail] 审计文件未生成（写入失败被静默处理）",
+        read_file("/dev/null/kb-abac-audit-noop/abac-audit.jsonl") == null);
 }
 
 // ---------------------------------------------------------------- grants 模式

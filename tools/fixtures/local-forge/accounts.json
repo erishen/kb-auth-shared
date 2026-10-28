@@ -1,0 +1,10 @@
+{
+  "comment": "forge 模式专用本地表：在 local-full 基础上加 mallory（role=admin，记录里故意塞了一个 hour=10 字段），用来验证「环境属性无法由主体记录伪造」——引擎的 env 事实只来自服务端 ctx，绝不读取主体记录里的 env 命名字段。其他账号与 local-full 保持一致，避免扰动其它回归。",
+  "accounts": {
+    "admin": { "role": "admin", "stages": [], "grade": 12, "title": "管理员（全库）" },
+    "alice": { "role": "student", "stages": ["stage-a"], "grade": 6, "title": "stage-a 用户" },
+    "dave": { "role": "student", "stages": ["stage-a", "stage-b"], "grade": 8, "title": "stage-a + stage-b 用户" },
+    "bob": { "role": "teacher", "stages": ["stage-b", "stage-c"], "grade": 0, "title": "stage-b + stage-c 教师" },
+    "mallory": { "role": "admin", "stages": [], "grade": 0, "title": "伪造环境属性的攻击者", "hour": 10 }
+  }
+}
