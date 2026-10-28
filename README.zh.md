@@ -129,7 +129,7 @@ named volume（`/app/state`）里，本地看不到该目录；但只要有进�
 ## 四套测试模式
 
 引擎的分层由加载期 env 决定，**一份脚本切不了 env**，所以 `tools/test-abac.lume`
-靠 `ABAC_MODE` 走四种环境、各起一个进程（合计 85 条断言）：
+靠 `ABAC_MODE` 走四种环境、各起一个进程（合计 130 条断言）：
 
 | 模式 | env 前置 | 断言 | 在测什么 |
 |---|---|---|---|
@@ -144,14 +144,14 @@ named volume（`/app/state`）里，本地看不到该目录；但只要有进�
 `"comment"` 字段——写成注释会被 `safe_json` 判成损坏。
 
 ```sh
-make check          # 85 条，四套环境
+make check          # 130 条，四套环境
 make test-central   # 只跑一套
 ```
 
 ## 改这里必须跑什么
 
 ```sh
-make check            # 本仓 85 条
+make check            # 本仓 130 条
 make -C ../kb-auth check   # 下游消费者 + server.lume type-check（在 kb-auth 仓库运行）
 # 再加各消费站点自己的 access-test（真实 shim 回归）
 ```
@@ -161,15 +161,46 @@ import 链，是「没破坏未接入项目行为」的主要证据。⚠️ 它
 追加 DENY 留痕（该目录被 gitignore，无版本面影响）；手工跑想避开就
 `STATE_DIR=/tmp/xxx ../../lume/lume/bin/lume tools/test-access.lume`。
 
-CI 里跑的就是上面这两条（不含 entrypoint——那个要 docker，单开 job）。`shared/` 仓的
-CI 工作流在 `.github/workflows/check.yml`，依赖 `erishen/lume`（public）。CI 里 Makefile
-的默认 `LUME_DIR=../../lume/lume` 不成立，必须显式传
-`LUME_DIR=$GITHUB_WORKSPACE/_deps/lume`（`apt-get install -y libsqlite3-dev libcrypt-dev m4 && make -j4` 即得 `bin/lume`）。
+CI 在 `.github/workflows/check.yml`：装**官方 lume release 二进制**（校验发布的
+sha256）后跑 `make check`。这与 `make bootstrap` 下载的是同一份产物，所以 CI 验证的
+就是外部贡献者实际拿到的东西。工作流里还带两道针对下面「假绿」坑的守卫：
+
+- 断言 `PASS` 总数 ≥120（某个子目标被改名/跳过后，整条链不会悄悄空掉）；
+- **负例对照**：跑 `make test LUME_DIR=/nonexistent`，若返回 0 就让 job 失败。
+  有人删掉守卫时这条会立刻变红。
+
+Makefile 的 lume 解析顺序：`LUME_DIR` → PATH 上的 `lume` → `../../lume/lume`（仅本地
+monorepo）→ `.tools/bin/lume`（`make bootstrap` 下载）。不再硬编码 monorepo 路径，
+裸克隆也能跑。
 
 ## 已知坑
 
+0. **凡是用 `grep FAIL` 判结果，必须同时断言「至少出现过一条 PASS」。** 这是本仓最危险
+   的模式，因为它的失败是**静默**而不是报错。
+
+   ```make
+   if echo "$$out" | grep -q FAIL; then echo "failed"; exit 1; fi; \
+     if ! echo "$$out" | grep -q "^PASS "; then echo "nothing ran"; exit 1; fi
+   ```
+
+   原因：`grep -q FAIL` 只覆盖「跑了且失败」。若解释器根本没起来（二进制缺失、路径错、
+   依赖没装），输出里既没有 PASS 也没有 FAIL —— 检查照样通过，目标报告成功。
+
+   本项目已经踩过**三次**：
+
+   | 位置 | 现象 |
+   |---|---|
+   | `kb-abac` | lume 不在 PATH → `make test` 报「全部通过」，实际 0 条断言 |
+   | `kb-auth` | 缺同一道守卫 → 同样静默成功 |
+   | `shared`（本仓） | 裸克隆无 lume → 四套模式全部同样静默成功 |
+
+   注意这道守卫本身也会出错：多行 recipe 里 `fi` 后漏分号，会让守卫把下一行吞进语句体，
+   明明测试通过了却报「什么都没跑」。加守卫后请**在有/无可用解释器两种情况下各跑一次**，
+   确认它真的会翻转。
+
 1. **lume 脚本只打印、不因断言非零退出** → Makefile 必须 `grep -q FAIL`，否则一片
    FAIL 也退 0（本仓 `shared/Makefile` 与 `admin/tools/test-entrypoint.sh` 都踩过）。
+   并且必须与上面那条 PASS 守卫配对使用。
 2. **`keys(null)` 是运行期错误**，会打挂整个请求 handler → 表读不到时要显式判 null
    （`accounts_list` 已加，corrupt 用例覆盖）。
 3. **取属性前先判空**：`subject_of(x).role` 在表读不到时当场 abort，测试里统一走

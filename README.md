@@ -145,7 +145,7 @@ the runtime image.
 
 The engine's layering is decided by load-time env and **one script can't switch env**, so
 `tools/test-abac.lume` runs four environments via `ABAC_MODE`, each in its own process
-(85 assertions total):
+(130 assertions total):
 
 | Mode | env preconditions | Asserts | What it tests |
 |---|---|---|---|
@@ -161,14 +161,14 @@ one actually applies" has a single answer (B PERMIT, A DENY). JSON can't have
 make `safe_json` flag the file as corrupt.
 
 ```sh
-make check          # 85 assertions, four environments
+make check          # 130 assertions, four environments
 make test-central   # only one environment
 ```
 
 ## What to run before changing this
 
 ```sh
-make check            # 85 assertions in this repo
+make check            # 130 assertions in this repo
 make -C ../kb-auth check   # downstream consumer + server.lume type-check (在 kb-auth 仓库运行)
 # plus each consumer site's own access-test (real shim regression)
 ```
@@ -179,17 +179,53 @@ behavior isn't broken". ⚠️ It appends DENY traces to that site's `state/abac
 (that dir is gitignored, no version impact); to avoid it manually, run
 `STATE_DIR=/tmp/xxx ../../lume/lume/bin/lume tools/test-access.lume`.
 
-CI runs exactly the two commands above (entrypoint is excluded — it needs docker, separate
-job). The `shared/` repo's CI workflow is in `.github/workflows/check.yml` and depends on
-`erishen/lume` (public). In CI the Makefile default `LUME_DIR=../../lume/lume` doesn't hold,
-so you must pass `LUME_DIR=$GITHUB_WORKSPACE/_deps/lume` explicitly
-(`apt-get install -y libsqlite3-dev libcrypt-dev m4 && make -j4` produces `bin/lume`).
+CI is `.github/workflows/check.yml`: it installs the **official lume release binary**
+(verified against its published sha256) and runs `make check`.
+
+That is the same artifact `make bootstrap` downloads, so CI exercises exactly what an
+outside contributor gets. The workflow also carries two guards against the silent-success
+pitfall above:
+
+- asserts the total `PASS` count is ≥120 (a renamed/skipped sub-target can no longer make
+  the chain quietly hollow out);
+- a **negative control**: runs `make test LUME_DIR=/nonexistent` and fails the job if it
+  exits 0. If someone removes the guard, this turns red.
+
+The Makefile resolves lume in this order — `LUME_DIR` → `lume` on `PATH` → `../../lume/lume`
+(local monorepo only) → `.tools/bin/lume` (from `make bootstrap`). No hardcoded monorepo
+path, so a bare clone works.
 
 ## Known pitfalls
 
+0. **Whenever you judge results with `grep FAIL`, also assert that at least one PASS was
+   produced.** This is the single most dangerous pattern in this codebase, because the
+   failure mode is *silence, not noise*.
+
+   ```make
+   if echo "$$out" | grep -q FAIL; then echo "failed"; exit 1; fi; \
+     if ! echo "$$out" | grep -q "^PASS "; then echo "nothing ran"; exit 1; fi
+   ```
+
+   Why: `grep -q FAIL` only catches the case where the script *ran and failed*. If the
+   interpreter never started (missing binary, wrong path, missing dependency), the output
+   contains neither PASS nor FAIL — so the check passes and the target reports success.
+
+   This has been hit **three separate times** in this project:
+
+   | Where | Symptom |
+   |---|---|
+   | `kb-abac` | lume not on PATH → `make test` printed "all passed" with 0 assertions |
+   | `kb-auth` | same guard missing → same silent success |
+   | `shared` (this repo) | fresh clone without lume → same, for all four modes |
+
+   Note the sibling guard is not enough on its own: a shell-quoting slip (`fi` without `;`
+   on a multi-line recipe) can make the guard *itself* swallow the next line and report
+   "nothing ran" even when the tests passed. When adding the guard, run the target both
+   with and without a working interpreter, and confirm it flips.
+
 1. **lume scripts only print and don't exit non-zero on failed assertions** → the Makefile
    must `grep -q FAIL`, otherwise a screen full of FAILs still exits 0 (both `shared/Makefile`
-   and `admin/tools/test-entrypoint.sh` have been bitten).
+   and `admin/tools/test-entrypoint.sh` have been bitten). Pair it with the PASS guard above.
 2. **`keys(null)` is a runtime error** that crashes the whole request handler → check for
    null explicitly when the table is unreadable (`accounts_list` already does; the corrupt
    case covers it).
