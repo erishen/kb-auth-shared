@@ -1,0 +1,114 @@
+# ============================================================
+# history 容器镜像构建专用 .dockerignore
+#
+# 构建命令（在 work/ 根执行）：
+#   docker build -f knowledge/history/docker/Dockerfile -t history:latest .
+#
+# 构建只需要三份源码树：lume/（宿主二进制，含 agent-httpd submodule）、
+# lume-core/（引擎）、knowledge/history/（本知识库）。其余目录一律不进
+# context，避免把本地构建产物 / 下载缓存（如 lume/docker 的 ghidra 依赖，
+# 约 1.4G）传进容器。
+# ============================================================
+
+# —— work 根下与构建无关的项目 ——
+docs
+electron
+golang
+harness
+playwright
+python
+research
+rust
+sale
+spring
+knowledge/medical-stats
+# math：现在 context 也是 work/ 根（引擎 COPY 进镜像），需要放行三个源码目录。
+# frontend/ 只留编译产物 www/（node_modules 83M 不进 context），logs 与本轮无关。
+knowledge/math/*
+!knowledge/math/server.lume
+!knowledge/math/lib
+!knowledge/math/data
+!knowledge/math/www
+!knowledge/math/.data
+!knowledge/math/docker
+
+# —— lume/ 目录下只保留 lume（宿主二进制）与 lume-core（引擎）两个仓库 ——
+lume/*
+!lume/lume
+!lume/lume-core
+!lume/lume-blog
+# lume-blog: 排除运行产物/密钥, 只带源码 + 预编译 www。
+lume/lume-blog/.data
+lume/lume-blog/logs
+lume/lume-blog/node_modules
+lume/lume-blog/otpauth-qr.png
+lume/lume-blog/otpauth-qr-sha1.png
+
+# lume（宿主二进制）构建不需要的目录
+lume/lume/docker
+lume/lume/frontend
+lume/lume/tests
+lume/lume/examples
+lume/lume/docs
+lume/lume/editor
+lume/lume/logs
+lume/lume/bin
+lume/lume/build
+lume/lume/build-asan
+lume/lume/www
+lume/lume/agent-httpd/bin
+lume/lume/agent-httpd/build
+lume/lume/agent-httpd/logs
+lume/lume/agent-httpd/www
+lume/lume/agent-httpd/cgi-bin
+
+# lume-core 构建不需要的目录
+lume/lume-core/bin
+lume/lume-core/build
+lume/lume-core/build-asan
+lume/lume-core/build-fuzz
+lume/lume-core/build-pack
+lume/lume-core/out
+lume/lume-core/tests
+
+# —— history：前端与产物在容器内重编，无需携带 ——
+knowledge/history/www
+knowledge/history/bin
+knowledge/history/.data
+knowledge/history/frontend/node_modules
+knowledge/history/frontend/ssr/node_modules
+knowledge/history/logs
+# 绝不把含 LLM/Auth 密钥的本机配置送进构建上下文
+knowledge/history/.env
+knowledge/history/.env.*
+
+# —— chinese：同 history，前端容器内重编；www/.data/logs 不进 context ——
+knowledge/chinese/www
+knowledge/chinese/.data
+knowledge/chinese/logs
+
+# —— shared：只把三份引擎进镜像（chinese COPY knowledge/shared/、admin COPY shared/）。
+#    tools/ 是宿主 make test 的单测与夹具，别打进运行镜像。
+#    ⚠️ math 不走这里：它是 compose 的 ../shared:/shared:ro 运行期绑定，
+#    不受 dockerignore 影响（夹具会被只读挂进容器，无害但看得见）。
+knowledge/shared/tools
+
+# —— 通用 ——
+**/.git
+**/node_modules
+**/*.log
+.DS_Store
+# 敏感: 本机密钥绝不进构建上下文(work 根的 compose 也会从宿主 .env 读取,
+# 但那是 run 时注入, 不是构建 context)。
+**/.env
+**/.env.*
+!lume/lume-blog/.env.example
+**/.data
+**/logs
+**/otpauth-qr.png
+**/otpauth-qr-sha1.png
+
+# math 需要在镜像里 COPY knowledge/math/.data/math.db（只读 SQLite 镜像）。
+# 上面 **/.data 会覆盖第 31 行的 !knowledge/math/.data，这里在末尾再声明一次，
+# 用“最后匹配生效”保证 math.db 一定进构建上下文（对 history/chinese 无害）。
+!knowledge/math/.data
