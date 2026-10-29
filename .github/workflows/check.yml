@@ -30,10 +30,10 @@ jobs:
           ASSET="lume-linux-x64"
           BASE="https://github.com/erishen/lume/releases/download/${LUME_VERSION}"
           mkdir -p "$RUNNER_TEMP/lume"
-          curl -fsSL --retry 3 -o "$RUNNER_TEMP/lume/a.tar.gz"      "$BASE/$ASSET.tar.gz"
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/lume/$ASSET.tar.gz" "$BASE/$ASSET.tar.gz"
           curl -fsSL --retry 3 -o "$RUNNER_TEMP/lume/$ASSET.sha256" "$BASE/$ASSET.sha256"
           cd "$RUNNER_TEMP/lume" && sha256sum -c "$ASSET.sha256"
-          tar -xzf a.tar.gz
+          tar -xzf "$ASSET.tar.gz"
           sudo install -m755 "$ASSET/bin/lume" /usr/local/bin/lume
           lume --version
 
