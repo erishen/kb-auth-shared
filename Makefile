@@ -43,7 +43,7 @@ else
   endif
 endif
 
-LUME_VERSION ?= v0.11.0
+LUME_VERSION ?= v0.12.2
 TOOLS_DIR    := $(CURDIR)/.tools
 
 define require_lume
